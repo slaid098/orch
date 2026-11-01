@@ -10,7 +10,19 @@ from typing import Any
 
 from loguru import logger
 
-COMMIT_TYPES = ("feat", "fix", "chore", "docs", "refactor", "test", "style", "perf")
+COMMIT_TYPES = (
+    "feat",
+    "fix",
+    "build",
+    "chore",
+    "ci",
+    "docs",
+    "refactor",
+    "revert",
+    "test",
+    "style",
+    "perf",
+)
 _TITLE_RE = re.compile(
     rf"^({'|'.join(COMMIT_TYPES)})\([a-z0-9][a-z0-9-]*\): .{{1,72}}$"
 )
