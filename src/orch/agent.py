@@ -106,6 +106,7 @@ def run_worker(config: Config, issue: Issue, run_dir: Path) -> WorkerResult:
 
 def _prepare_workspace(container: str, branch: str, config: Config) -> None:
     command = (
+        "git config --global --add safe.directory /src/.git && "
         "git clone /src /work && "
         'git config user.name "orch" && '
         'git config user.email "orch@example.invalid" && '
@@ -271,7 +272,7 @@ def _exec_or_raise(
     )
     if result.returncode != 0:
         details = (result.stderr or result.stdout or "").strip()
-        logger.bind(label=label, returncode=result.returncode, details=details[-2000:]).error(
-            "Worker step failed"
+        logger.bind(label=label, returncode=result.returncode).error(
+            "Worker step failed: {}", details[-2000:]
         )
         raise AgentError(f"{label} failed")
