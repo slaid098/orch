@@ -319,7 +319,8 @@ def _status(config: Config) -> int:
         return 0
 
     for run in runs:
-        error = (run.get("error") or "").splitlines()[0][:80]
+        error_lines = (run.get("error") or "").strip().splitlines()
+        error = error_lines[0][:80] if error_lines else ""
         print(
             f"{run['started_at'][:19]}  #{run['issue']:<4}  {run['status']:<12}  "
             f"{run['branch']:<12}  {run.get('pr_url') or '-'}  {error}"

@@ -7,7 +7,9 @@ from pathlib import Path
 import pytest
 
 import orch
-from orch.cli import main
+from orch import store
+from orch.cli import _status, main
+from orch.config import Config, LabelsConfig, RepoConfig, WorkerConfig
 
 
 def test_version_flag_prints_version_and_exits_zero(
@@ -62,3 +64,35 @@ def test_command_is_still_required() -> None:
         main([])
 
     assert excinfo.value.code == 2
+
+
+def test_status_handles_a_successful_run_without_an_error(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config = Config(
+        repo=RepoConfig(owner="slaid098", name="orch", path=tmp_path),
+        labels=LabelsConfig(),
+        worker=WorkerConfig(test_commands=("pytest",)),
+        data_dir=tmp_path / "data",
+    )
+    db_path = config.data_dir / "orch.db"
+    store.init_db(db_path)
+    store.create_run(
+        db_path,
+        run_id="run-1",
+        repo="slaid098/orch",
+        issue=1,
+        branch="agent/1",
+    )
+    store.finish_run(
+        db_path,
+        run_id="run-1",
+        status="pr_open",
+        pr_url="https://example.test/pr/1",
+    )
+
+    assert _status(config) == 0
+    out = capsys.readouterr().out
+    assert "pr_open" in out
+    assert "https://example.test/pr/1" in out
