@@ -11,41 +11,23 @@ import re
 from pathlib import Path
 from typing import Any
 
-from loguru import logger
-
+from orch.config.logger import get_logger
+from orch.constants.standards import (
+    COMMIT_TYPES,
+    ISSUE_BODY_HEADINGS,
+    PR_HEADINGS,
+    TITLE_MAX_LENGTH,
+)
+from orch.exceptions.standards import StandardsError
 from orch.schemas.standards.types import Handoff
 
-COMMIT_TYPES = (
-    "feat",
-    "fix",
-    "build",
-    "chore",
-    "ci",
-    "docs",
-    "refactor",
-    "revert",
-    "test",
-    "style",
-    "perf",
-)
-TITLE_MAX_LENGTH = 72
-ISSUE_BODY_HEADINGS = ("## Что сделать", "## Почему")
-PR_HEADINGS = (
-    "## Что сделано",
-    "## Почему",
-    "## На что обратить внимание",
-    "## Что осталось",
-)
+log = get_logger(component="standards")
 
 _TITLE_RE = re.compile(
     rf"^({'|'.join(COMMIT_TYPES)})\(([a-z0-9][a-z0-9-]*)\): (.+)$"
 )
 _CYRILLIC_RE = re.compile(r"[\u0400-\u04FF]")
 _SLUG_INVALID_RE = re.compile(r"[^a-z0-9]+")
-
-
-class StandardsError(ValueError):
-    """Raised when a title or worker handoff violates the standards."""
 
 
 def validate_title(title: str) -> str:
@@ -118,30 +100,7 @@ def validate_issue_body(body: str) -> str:
     return text
 
 
-def format_issue_body(what: str, why: str) -> str:
-    """Build the required issue body structure.
-
-    Args:
-        what: Concrete change or outcome.
-        why: Problem or reason for the change.
-
-    Returns:
-        Markdown body with the required headings.
-
-    Raises:
-        StandardsError: If either section is empty.
-    """
-    what_text = what.strip()
-    why_text = why.strip()
-    if not what_text or not why_text:
-        raise StandardsError("Issue body 'what' and 'why' sections must not be empty")
-    return (
-        f"{ISSUE_BODY_HEADINGS[0]}\n{what_text}\n\n"
-        f"{ISSUE_BODY_HEADINGS[1]}\n{why_text}\n"
-    )
-
-
-def parse_title(title: str) -> tuple[str, str, str]:
+def _parse_title(title: str) -> tuple[str, str, str]:
     """Split a validated title into ``type``, ``scope``, and ``description``.
 
     Args:
@@ -157,7 +116,7 @@ def parse_title(title: str) -> tuple[str, str, str]:
     return match.group(1), match.group(2), match.group(3).strip()
 
 
-def slugify(value: str, *, limit: int = 40) -> str:
+def _slugify(value: str, *, limit: int = 40) -> str:
     """Convert a title description into a branch-safe slug.
 
     Args:
@@ -184,8 +143,8 @@ def branch_name(title: str, issue_number: int) -> str:
     Returns:
         A branch in ``type/scope/issue-<N>-<slug>`` form.
     """
-    commit_type, scope, description = parse_title(title)
-    return f"{commit_type}/{scope}/issue-{issue_number}-{slugify(description)}"
+    commit_type, scope, description = _parse_title(title)
+    return f"{commit_type}/{scope}/issue-{issue_number}-{_slugify(description)}"
 
 
 def validate_branch(branch: str, issue_number: int) -> str:
@@ -230,7 +189,7 @@ def load_handoff(run_dir: Path) -> Handoff:
     except FileNotFoundError as ex:
         raise StandardsError(f"Worker did not write {path}") from ex
     except (OSError, json.JSONDecodeError) as ex:
-        logger.bind(
+        log.bind(
             path=str(path), error=ex, error_type=type(ex).__name__
         ).error("Could not read worker handoff")
         raise StandardsError(f"Could not read worker handoff: {ex}") from ex

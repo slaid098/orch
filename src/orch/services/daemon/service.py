@@ -6,12 +6,15 @@ import sys
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
 
-from loguru import logger
+from orch.config.logger import get_logger, logger
+from orch.exceptions.github import GitHubError
+from orch.schemas.config.types import Config
+from orch.schemas.pipeline.types import RunOutcome
+from orch.services import github, store
+from orch.services.docker import cleanup_managed
+from orch.services.pipeline import run_issue
 
-from orch import github, store
-from orch.config import Config
-from orch.docker import cleanup_managed
-from orch.pipeline import RunOutcome, run_issue
+log = get_logger(component="daemon")
 
 
 def setup_logging(config: Config) -> None:
@@ -78,20 +81,20 @@ def run_once(config: Config, token: str, issue_number: int) -> int:
     """
     try:
         issue = github.get_issue(config.repo.full_name, issue_number, token)
-    except github.GitHubError as ex:
-        logger.bind(error=ex, error_type=type(ex).__name__).error(
+    except GitHubError as ex:
+        log.bind(error=ex, error_type=type(ex).__name__).error(
             "Could not fetch issue"
         )
         return 1
 
     outcome = run_issue(config, issue, token)
     if outcome.status == "pr_open":
-        print(f"PR opened: {outcome.pr_url}")
-        print(f"Run directory: {outcome.run_dir}")
+        log.info("PR opened: {}", outcome.pr_url)
+        log.info("Run directory: {}", outcome.run_dir)
         return 0
 
-    print(f"Needs human: {outcome.error}")
-    print(f"Run directory: {outcome.run_dir}")
+    log.info("Needs human: {}", outcome.error)
+    log.info("Run directory: {}", outcome.run_dir)
     return 1
 
 
@@ -105,7 +108,7 @@ def run_daemon(config: Config, token: str) -> int:
     Returns:
         Process exit code.
     """
-    logger.info(
+    log.info(
         "Daemon started for {} with {} worker slot(s)",
         config.repo.full_name,
         config.max_workers,
@@ -128,8 +131,8 @@ def run_daemon(config: Config, token: str) -> int:
                         config.labels.queued,
                         token,
                     )
-                except github.GitHubError as ex:
-                    logger.bind(error=ex, error_type=type(ex).__name__).error(
+                except GitHubError as ex:
+                    log.bind(error=ex, error_type=type(ex).__name__).error(
                         "Poll failed; retrying"
                     )
                     time.sleep(config.poll_interval_seconds)
@@ -149,7 +152,7 @@ def run_daemon(config: Config, token: str) -> int:
 
                     if not _claim_issue(config, issue, token):
                         continue
-                    logger.info("Claiming issue #{}: {}", issue.number, issue.title)
+                    log.info("Claiming issue #{}: {}", issue.number, issue.title)
                     active[issue.number] = executor.submit(
                         run_issue,
                         config,
@@ -160,7 +163,7 @@ def run_daemon(config: Config, token: str) -> int:
 
                 time.sleep(config.poll_interval_seconds)
         except KeyboardInterrupt:
-            logger.info("Daemon stopping; waiting for active workers")
+            log.info("Daemon stopping; waiting for active workers")
             return 0
 
 
@@ -171,13 +174,13 @@ def _reap_finished(active: dict[int, Future[RunOutcome]]) -> None:
         try:
             outcome = future.result()
         except Exception as ex:
-            logger.bind(
+            log.bind(
                 issue=issue_number,
                 error=ex,
                 error_type=type(ex).__name__,
             ).error("Unhandled issue worker failure")
         else:
-            logger.info(
+            log.info(
                 "Issue #{} finished with status {}",
                 issue_number,
                 outcome.status,
@@ -194,8 +197,8 @@ def _claim_issue(config: Config, issue: github.Issue, token: str) -> bool:
             add=(config.labels.running,),
             remove=(config.labels.queued, config.labels.needs_human),
         )
-    except github.GitHubError as ex:
-        logger.bind(
+    except GitHubError as ex:
+        log.bind(
             issue=issue.number,
             error=ex,
             error_type=type(ex).__name__,
@@ -212,7 +215,7 @@ def _reconcile_startup(config: Config, token: str) -> None:
         config.repo.full_name,
     )
     if interrupted:
-        logger.warning("Marked {} interrupted run(s) as interrupted", interrupted)
+        log.warning("Marked {} interrupted run(s) as interrupted", interrupted)
 
     try:
         issues = github.list_ready_issues(
@@ -220,8 +223,8 @@ def _reconcile_startup(config: Config, token: str) -> None:
             config.labels.running,
             token,
         )
-    except github.GitHubError as ex:
-        logger.bind(error=ex, error_type=type(ex).__name__).warning(
+    except GitHubError as ex:
+        log.bind(error=ex, error_type=type(ex).__name__).warning(
             "Could not reconcile running issues"
         )
         return
@@ -241,11 +244,11 @@ def _reconcile_startup(config: Config, token: str) -> None:
                 add=(config.labels.queued,),
                 remove=(config.labels.running, config.labels.needs_human),
             )
-        except github.GitHubError as ex:
-            logger.bind(
+        except GitHubError as ex:
+            log.bind(
                 issue=issue.number,
                 error=ex,
                 error_type=type(ex).__name__,
             ).error("Could not requeue issue after restart")
         else:
-            logger.info("Requeued issue #{} after daemon restart", issue.number)
+            log.info("Requeued issue #{} after daemon restart", issue.number)

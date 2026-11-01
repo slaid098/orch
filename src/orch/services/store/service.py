@@ -6,9 +6,10 @@ import sqlite3
 from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
 
-from loguru import logger
+from orch.config.logger import get_logger
+
+log = get_logger(component="store")
 
 
 def init_db(db_path: Path) -> None:
@@ -55,7 +56,7 @@ def create_run(
             (run_id, repo, issue, branch, _now()),
         )
         conn.commit()
-    logger.info("Created run {} for issue #{}", run_id, issue)
+    log.info("Created run {} for issue #{}", run_id, issue)
 
 
 def finish_run(
@@ -77,7 +78,7 @@ def finish_run(
             (status, pr_url, _now(), error, run_id),
         )
         conn.commit()
-    logger.info("Finished run {} with status {}", run_id, status)
+    log.info("Finished run {} with status {}", run_id, status)
 
 
 def has_active_run(db_path: Path, repo: str, issue: int) -> bool:
@@ -108,36 +109,8 @@ def interrupt_active_runs(db_path: Path, repo: str) -> int:
         conn.commit()
         count = cursor.rowcount
     if count:
-        logger.warning("Interrupted {} active run(s) for {}", count, repo)
+        log.warning("Interrupted {} active run(s) for {}", count, repo)
     return count
-
-
-def list_runs(db_path: Path, *, limit: int = 20) -> list[dict[str, Any]]:
-    """Return recent runs, newest first."""
-    with closing(_connect(db_path)) as conn:
-        rows = conn.execute(
-            "SELECT * FROM runs ORDER BY started_at DESC LIMIT ?",
-            (limit,),
-        ).fetchall()
-    return [dict(row) for row in rows]
-
-
-def latest_run_for_issue(
-    db_path: Path,
-    repo: str,
-    issue: int,
-) -> dict[str, Any] | None:
-    """Return the latest run for an issue, if any."""
-    with closing(_connect(db_path)) as conn:
-        row = conn.execute(
-            """
-            SELECT * FROM runs
-            WHERE repo = ? AND issue = ?
-            ORDER BY started_at DESC LIMIT 1
-            """,
-            (repo, issue),
-        ).fetchone()
-    return dict(row) if row else None
 
 
 def _connect(db_path: Path) -> sqlite3.Connection:

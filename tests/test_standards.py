@@ -5,17 +5,16 @@ from pathlib import Path
 
 import pytest
 
+from orch.exceptions.standards import StandardsError
 from orch.schemas.standards.types import Handoff
 from orch.services.standards import (
-    StandardsError,
     branch_name,
-    format_issue_body,
     format_pr_body,
     load_handoff,
     validate_branch,
-    validate_issue_body,
     validate_title,
 )
+from orch.services.standards.policy import validate_issue_body
 
 
 @pytest.mark.parametrize(
@@ -48,9 +47,9 @@ def test_validate_title_rejects_invalid_titles(title: str) -> None:
 
 
 def test_issue_body_requires_what_and_why() -> None:
-    body = format_issue_body(
-        "Добавить проверку заголовка.",
-        "Невалидные issue не должны запускать worker.",
+    body = (
+        "## Что сделать\nДобавить проверку заголовка.\n\n"
+        "## Почему\nНевалидные issue не должны запускать worker.\n"
     )
 
     assert validate_issue_body(body) == body.strip()

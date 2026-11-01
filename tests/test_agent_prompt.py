@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from orch.agent import build_prompt
-from orch.config import Config, LabelsConfig, RepoConfig, WorkerConfig
-from orch.github import Issue
+from orch.schemas.config.types import Config, LabelsConfig, RepoConfig, WorkerConfig
+from orch.schemas.github.types import Issue
+from orch.services.worker.service import build_prompt
 
 
 def _config(tmp_path: Path) -> Config:

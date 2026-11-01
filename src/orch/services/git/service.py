@@ -9,11 +9,10 @@ import subprocess
 from collections.abc import Callable
 from pathlib import Path
 
-from loguru import logger
+from orch.config.logger import get_logger
+from orch.exceptions.git import GitError
 
-
-class GitError(RuntimeError):
-    """Raised when a git operation fails."""
+log = get_logger(component="git")
 
 
 def refresh_mirror(
@@ -60,7 +59,7 @@ def refresh_mirror(
         secret=token,
     )
     _run_git(["--git-dir", str(mirror), "rev-parse", base_ref], cwd=mirror)
-    logger.info("Refreshed source mirror to {}/{}", owner, name)
+    log.info("Refreshed source mirror to {}/{}", owner, name)
     return mirror
 
 
@@ -78,7 +77,7 @@ def clone_source(mirror: Path, base_branch: str, destination: Path) -> Path:
         cwd=destination.parent,
     )
     _run_git(["checkout", base_branch], cwd=destination)
-    logger.info("Created worker source at {}", destination)
+    log.info("Created worker source at {}", destination)
     return destination
 
 
@@ -98,11 +97,11 @@ def _remove_if_present(destination: Path, *, label: str) -> None:
     except FileNotFoundError:
         return
     except OSError as ex:
-        logger.bind(
+        log.bind(
             path=str(destination), error=ex, error_type=type(ex).__name__
         ).warning("Could not remove {}", label)
     else:
-        logger.debug("Removed {} {}", label, destination)
+        log.debug("Removed {} {}", label, destination)
 
 
 def _remove_tree(path: Path) -> None:
@@ -153,7 +152,7 @@ def import_bundle(bundle: Path, branch: str, run_dir: Path) -> Path:
         ],
         cwd=run_dir,
     )
-    logger.info("Imported bundle for branch {}", branch)
+    log.info("Imported bundle for branch {}", branch)
     return bare
 
 
@@ -186,7 +185,7 @@ def push_branch(bare: Path, branch: str, remote_url: str, token: str) -> None:
     except GitError as ex:
         raise GitError(f"Could not push branch {branch}") from ex
     else:
-        logger.info("Pushed branch {} to GitHub", branch)
+        log.info("Pushed branch {} to GitHub", branch)
 
 
 def authenticated_remote(owner: str, name: str, token: str) -> str:
@@ -215,20 +214,20 @@ def _run_git(
             check=False,
         )
     except subprocess.TimeoutExpired as ex:
-        logger.bind(
+        log.bind(
             args=_redact_args(args, secret),
             timeout=timeout,
         ).error("Git command timed out")
         raise GitError(f"Git command timed out after {timeout}s") from ex
     except OSError as ex:
-        logger.bind(error=ex, error_type=type(ex).__name__).error(
+        log.bind(error=ex, error_type=type(ex).__name__).error(
             "Could not execute git"
         )
         raise GitError("Could not execute git") from ex
     else:
         if result.returncode != 0:
             message = _redact((result.stderr or result.stdout).strip(), secret)
-            logger.bind(
+            log.bind(
                 args=_redact_args(args, secret),
                 returncode=result.returncode,
                 stderr=message,

@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+import sqlite3
 import time
+from contextlib import closing
 from pathlib import Path
 
 import pytest
 
-from orch import pipeline, store
-from orch.agent import WorkerResult
-from orch.config import Config, LabelsConfig, RepoConfig, WorkerConfig
-from orch.github import Issue
+from orch.schemas.config.types import Config, LabelsConfig, RepoConfig, WorkerConfig
+from orch.schemas.github.types import Issue
 from orch.schemas.standards.types import Handoff
+from orch.schemas.worker.types import WorkerResult
+from orch.services import store
+from orch.services.pipeline import service as pipeline
 
 
 def _config(tmp_path: Path) -> Config:
@@ -35,6 +38,12 @@ def _issue() -> Issue:
         author="slaid098",
         labels=("agent:queued",),
     )
+
+
+def _run_status(db_path: Path) -> str | None:
+    with closing(sqlite3.connect(db_path)) as conn:
+        row = conn.execute("SELECT status FROM runs LIMIT 1").fetchone()
+    return row[0] if row else None
 
 
 def _handoff() -> Handoff:
@@ -71,15 +80,15 @@ def test_retry_reuses_source_and_workspace_and_succeeds(
     deleted: list[str] = []
     prs: list[dict[str, object]] = []
 
-    monkeypatch.setattr(pipeline, "refresh_mirror", lambda *args: tmp_path / "mirror.git")
+    monkeypatch.setattr(pipeline.gitops, "refresh_mirror", lambda *args: tmp_path / "mirror.git")
 
     def clone_source(_mirror: Path, _base: str, destination: Path) -> Path:
         destination.mkdir(parents=True)
         return destination
 
-    monkeypatch.setattr(pipeline, "clone_source", clone_source)
+    monkeypatch.setattr(pipeline.gitops, "clone_source", clone_source)
     monkeypatch.setattr(
-        pipeline,
+        pipeline.gitops,
         "cleanup_source",
         lambda source: cleaned_sources.append(source),
     )
@@ -167,13 +176,7 @@ def test_retry_reuses_source_and_workspace_and_succeeds(
     assert "Closes #9" in str(prs[0]["body"])
     assert any("Попытка 1/2" in body for body in comments)
 
-    latest = store.latest_run_for_issue(
-        config.data_dir / "orch.db",
-        "slaid098/orch",
-        9,
-    )
-    assert latest is not None
-    assert latest["status"] == "pr_open"
+    assert _run_status(config.data_dir / "orch.db") == "pr_open"
 
 
 def test_invalid_issue_title_is_parked_without_worker(
@@ -231,14 +234,14 @@ def test_exhausted_attempts_mark_needs_human(
     issue = _issue()
     labels: list[tuple[tuple[str, ...], tuple[str, ...]]] = []
 
-    monkeypatch.setattr(pipeline, "refresh_mirror", lambda *args: tmp_path / "mirror.git")
+    monkeypatch.setattr(pipeline.gitops, "refresh_mirror", lambda *args: tmp_path / "mirror.git")
 
     def clone_source(_mirror: Path, _base: str, destination: Path) -> Path:
         destination.mkdir(parents=True)
         return destination
 
-    monkeypatch.setattr(pipeline, "clone_source", clone_source)
-    monkeypatch.setattr(pipeline, "cleanup_source", lambda _source: None)
+    monkeypatch.setattr(pipeline.gitops, "clone_source", clone_source)
+    monkeypatch.setattr(pipeline.gitops, "cleanup_source", lambda _source: None)
     monkeypatch.setattr(pipeline.github, "find_open_pr", lambda *_args: None)
     monkeypatch.setattr(pipeline.github, "delete_branch", lambda *_args: None)
     monkeypatch.setattr(pipeline.github, "comment_issue", lambda *_args: None)
@@ -269,10 +272,4 @@ def test_exhausted_attempts_mark_needs_human(
         ("agent:needs-human",),
         ("agent:running", "agent:queued"),
     )
-    latest = store.latest_run_for_issue(
-        config.data_dir / "orch.db",
-        "slaid098/orch",
-        9,
-    )
-    assert latest is not None
-    assert latest["status"] == "needs_human"
+    assert _run_status(config.data_dir / "orch.db") == "needs_human"

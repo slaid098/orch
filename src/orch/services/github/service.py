@@ -5,49 +5,13 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-from dataclasses import dataclass
-from typing import Any
 from urllib.parse import quote
 
-from loguru import logger
+from orch.config.logger import get_logger
+from orch.exceptions.github import GitHubError
+from orch.schemas.github.types import Issue
 
-
-class GitHubError(RuntimeError):
-    """Raised when a GitHub CLI command fails."""
-
-
-@dataclass(frozen=True)
-class Issue:
-    """A GitHub issue reduced to the fields used by the pipeline."""
-
-    number: int
-    title: str
-    body: str
-    url: str
-    author: str
-    labels: tuple[str, ...]
-
-    @classmethod
-    def from_json(cls, data: dict[str, Any]) -> Issue:
-        """Build an issue from ``gh issue --json`` output."""
-        author = data.get("author") or {}
-        labels = tuple(
-            label["name"]
-            for label in data.get("labels", [])
-            if isinstance(label, dict) and label.get("name")
-        )
-        return cls(
-            number=int(data["number"]),
-            title=str(data["title"]),
-            body=str(data.get("body") or ""),
-            url=str(data.get("url") or ""),
-            author=str(author.get("login") or ""),
-            labels=labels,
-        )
-
-    def has_label(self, label: str) -> bool:
-        """Return whether the issue currently has the given label."""
-        return label in self.labels
+log = get_logger(component="github")
 
 
 def resolve_token(owner: str, configured: str | None) -> str:
@@ -75,7 +39,7 @@ def resolve_token(owner: str, configured: str | None) -> str:
             check=False,
         )
     except OSError as ex:
-        logger.bind(error=ex, error_type=type(ex).__name__).error(
+        log.bind(error=ex, error_type=type(ex).__name__).error(
             "Could not execute gh"
         )
         raise GitHubError("Could not execute gh; is GitHub CLI installed?") from ex
@@ -83,7 +47,7 @@ def resolve_token(owner: str, configured: str | None) -> str:
         token = result.stdout.strip()
         if result.returncode != 0 or not token:
             message = (result.stderr or result.stdout).strip()
-            logger.bind(owner=owner, stderr=message).error(
+            log.bind(owner=owner, stderr=message).error(
                 "Could not resolve GitHub token"
             )
             raise GitHubError(
@@ -101,7 +65,7 @@ def ensure_user(token: str, expected: str) -> None:
             f"GitHub token belongs to {login!r}, expected {expected!r}. "
             "Set GH_TOKEN to the correct account."
         )
-    logger.info("GitHub account: {}", login)
+    log.info("GitHub account: {}", login)
 
 
 def ensure_labels(
@@ -132,7 +96,7 @@ def ensure_labels(
             ],
             token,
         )
-        logger.debug("Ensured label {}", name)
+        log.debug("Ensured label {}", name)
 
 
 def list_ready_issues(repo: str, label: str, token: str) -> list[Issue]:
@@ -157,7 +121,7 @@ def list_ready_issues(repo: str, label: str, token: str) -> list[Issue]:
     try:
         data = json.loads(output or "[]")
     except json.JSONDecodeError as ex:
-        logger.bind(error=ex, error_type=type(ex).__name__).error(
+        log.bind(error=ex, error_type=type(ex).__name__).error(
             "Could not parse gh issue list output"
         )
         raise GitHubError("Could not parse gh issue list output") from ex
@@ -183,7 +147,7 @@ def get_issue(repo: str, number: int, token: str) -> Issue:
     try:
         data = json.loads(output)
     except json.JSONDecodeError as ex:
-        logger.bind(error=ex, error_type=type(ex).__name__).error(
+        log.bind(error=ex, error_type=type(ex).__name__).error(
             "Could not parse gh issue view output"
         )
         raise GitHubError("Could not parse gh issue view output") from ex
@@ -209,7 +173,7 @@ def edit_labels(
     for label in remove:
         args.extend(["--remove-label", label])
     _run_gh(args, token)
-    logger.info("Issue #{} labels: +{} -{}", number, list(add), list(remove))
+    log.info("Issue #{} labels: +{} -{}", number, list(add), list(remove))
 
 
 def comment_issue(repo: str, number: int, token: str, body: str) -> None:
@@ -219,7 +183,7 @@ def comment_issue(repo: str, number: int, token: str, body: str) -> None:
         token,
         input_text=body,
     )
-    logger.info("Commented on issue #{}", number)
+    log.info("Commented on issue #{}", number)
 
 
 def find_open_pr(repo: str, head: str, token: str) -> str | None:
@@ -242,7 +206,7 @@ def find_open_pr(repo: str, head: str, token: str) -> str | None:
     try:
         data = json.loads(output or "[]")
     except json.JSONDecodeError as ex:
-        logger.bind(error=ex, error_type=type(ex).__name__).error(
+        log.bind(error=ex, error_type=type(ex).__name__).error(
             "Could not parse gh pr list output"
         )
         raise GitHubError("Could not parse gh pr list output") from ex
@@ -262,11 +226,11 @@ def delete_branch(repo: str, branch: str, token: str) -> None:
             token,
         )
     except GitHubError as ex:
-        logger.bind(branch=branch, error=str(ex)).warning(
+        log.bind(branch=branch, error=str(ex)).warning(
             "Could not delete stale branch (it may not exist)"
         )
     else:
-        logger.info("Deleted stale branch {}", branch)
+        log.info("Deleted stale branch {}", branch)
 
 
 def create_pr(
@@ -281,7 +245,7 @@ def create_pr(
     """Create a pull request or return the existing open one."""
     existing = find_open_pr(repo, head, token)
     if existing:
-        logger.info("Pull request already exists: {}", existing)
+        log.info("Pull request already exists: {}", existing)
         return existing
 
     output = _run_gh(
@@ -305,7 +269,7 @@ def create_pr(
     url = output.strip().splitlines()[-1] if output.strip() else ""
     if not url:
         raise GitHubError("gh pr create returned no pull request URL")
-    logger.info("Created pull request: {}", url)
+    log.info("Created pull request: {}", url)
     return url
 
 
@@ -334,19 +298,19 @@ def _run_gh(
             check=False,
         )
     except subprocess.TimeoutExpired as ex:
-        logger.bind(args=args[:3], timeout=timeout).error(
+        log.bind(args=args[:3], timeout=timeout).error(
             "GitHub CLI command timed out"
         )
         raise GitHubError(f"GitHub CLI command timed out after {timeout}s") from ex
     except OSError as ex:
-        logger.bind(error=ex, error_type=type(ex).__name__).error(
+        log.bind(error=ex, error_type=type(ex).__name__).error(
             "Could not execute gh"
         )
         raise GitHubError("Could not execute gh") from ex
     else:
         if check and result.returncode != 0:
             message = (result.stderr or result.stdout).strip()
-            logger.bind(
+            log.bind(
                 args=args[:3],
                 returncode=result.returncode,
                 stderr=message,

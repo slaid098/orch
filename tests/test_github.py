@@ -4,8 +4,8 @@ import subprocess
 
 import pytest
 
-from orch import github
-from orch.github import Issue
+from orch.schemas.github.types import Issue
+from orch.services.github import service as github
 
 
 def test_issue_from_json() -> None:

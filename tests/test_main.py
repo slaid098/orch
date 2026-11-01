@@ -5,7 +5,8 @@ from pathlib import Path
 import pytest
 
 import main as orch_main
-from orch.config import Config, ConfigError, LabelsConfig, RepoConfig, WorkerConfig
+from orch.exceptions.config import ConfigError
+from orch.schemas.config.types import Config, LabelsConfig, RepoConfig, WorkerConfig
 
 
 def _config(tmp_path: Path) -> Config:

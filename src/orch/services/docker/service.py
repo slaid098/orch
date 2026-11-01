@@ -5,14 +5,25 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from loguru import logger
+from orch.config.logger import get_logger
+from orch.exceptions.docker import DockerError
+
+log = get_logger(component="docker")
 
 
-class DockerError(RuntimeError):
-    """Raised when a Docker command fails."""
+def _prepare_workspace_dir(workspace_path: Path) -> None:
+    workspace_path.mkdir(parents=True, exist_ok=True)
+    try:
+        workspace_path.chmod(0o777)
+    except OSError as ex:
+        log.bind(
+            path=str(workspace_path),
+            error=ex,
+            error_type=type(ex).__name__,
+        ).warning("Could not widen workspace permissions")
 
 
-def start_worker(
+def _worker_run_args(
     *,
     image: str,
     name: str,
@@ -20,36 +31,8 @@ def start_worker(
     workspace_path: Path,
     run_dir: Path,
     model: str,
-) -> str:
-    """Start a detached worker container.
-
-    Args:
-        image: Worker image tag.
-        name: Container name.
-        repo_path: Host repository mounted read-only at ``/src``.
-        workspace_path: Persistent host workspace mounted at ``/work``.
-        run_dir: Host run directory mounted at ``/out``.
-        model: Ollama model name passed to Claude Code.
-
-    Returns:
-        The container ID.
-    """
-    if not image_exists(image):
-        raise DockerError(
-            f"Worker image {image!r} does not exist. Build it with Docker."
-        )
-
-    workspace_path.mkdir(parents=True, exist_ok=True)
-    try:
-        workspace_path.chmod(0o777)
-    except OSError as ex:
-        logger.bind(
-            path=str(workspace_path),
-            error=ex,
-            error_type=type(ex).__name__,
-        ).warning("Could not widen workspace permissions")
-
-    args = [
+) -> list[str]:
+    return [
         "docker",
         "run",
         "-d",
@@ -98,11 +81,48 @@ def start_worker(
         image,
     ]
 
+
+def start_worker(
+    *,
+    image: str,
+    name: str,
+    repo_path: Path,
+    workspace_path: Path,
+    run_dir: Path,
+    model: str,
+) -> str:
+    """Start a detached worker container.
+
+    Args:
+        image: Worker image tag.
+        name: Container name.
+        repo_path: Host repository mounted read-only at ``/src``.
+        workspace_path: Persistent host workspace mounted at ``/work``.
+        run_dir: Host run directory mounted at ``/out``.
+        model: Ollama model name passed to Claude Code.
+
+    Returns:
+        The container ID.
+    """
+    if not _image_exists(image):
+        raise DockerError(
+            f"Worker image {image!r} does not exist. Build it with Docker."
+        )
+
+    _prepare_workspace_dir(workspace_path)
+    args = _worker_run_args(
+        image=image,
+        name=name,
+        repo_path=repo_path,
+        workspace_path=workspace_path,
+        run_dir=run_dir,
+        model=model,
+    )
     result = _run(args, timeout=120)
     container_id = (result.stdout or "").strip()
     if not container_id:
         raise DockerError("docker run returned no container id")
-    logger.info("Started worker container {} ({})", name, container_id[:12])
+    log.info("Started worker container {} ({})", name, container_id[:12])
     return container_id
 
 
@@ -157,12 +177,12 @@ def exec_in(
             check=False,
         )
     except subprocess.TimeoutExpired as ex:
-        logger.bind(container=name, timeout=timeout).error(
+        log.bind(container=name, timeout=timeout).error(
             "Container command timed out"
         )
         raise DockerError(f"Container command timed out after {timeout}s") from ex
     except OSError as ex:
-        logger.bind(error=ex, error_type=type(ex).__name__).error(
+        log.bind(error=ex, error_type=type(ex).__name__).error(
             "Could not execute docker exec"
         )
         raise DockerError("Could not execute docker exec") from ex
@@ -186,7 +206,7 @@ def cleanup_managed() -> None:
     for container_id in container_ids:
         _run(["docker", "rm", "-f", container_id], timeout=60, check=False)
     if container_ids:
-        logger.info("Removed {} orphan worker container(s)", len(container_ids))
+        log.info("Removed {} orphan worker container(s)", len(container_ids))
 
 
 def stop(name: str) -> None:
@@ -194,9 +214,9 @@ def stop(name: str) -> None:
     try:
         _run(["docker", "rm", "-f", name], timeout=60)
     except DockerError:
-        logger.bind(container=name).warning("Could not remove container")
+        log.bind(container=name).warning("Could not remove container")
     else:
-        logger.info("Removed worker container {}", name)
+        log.info("Removed worker container {}", name)
 
 
 def logs(name: str, *, tail: int = 100) -> str:
@@ -205,7 +225,7 @@ def logs(name: str, *, tail: int = 100) -> str:
     return ((result.stdout or "") + (result.stderr or "")).strip()
 
 
-def image_exists(image: str) -> bool:
+def _image_exists(image: str) -> bool:
     """Return whether a Docker image is available locally."""
     result = _run(
         ["docker", "image", "inspect", image],
@@ -232,17 +252,17 @@ def _run(
             check=False,
         )
     except subprocess.TimeoutExpired as ex:
-        logger.bind(args=args[:3], timeout=timeout).error("Docker command timed out")
+        log.bind(args=args[:3], timeout=timeout).error("Docker command timed out")
         raise DockerError(f"Docker command timed out after {timeout}s") from ex
     except OSError as ex:
-        logger.bind(error=ex, error_type=type(ex).__name__).error(
+        log.bind(error=ex, error_type=type(ex).__name__).error(
             "Could not execute docker"
         )
         raise DockerError("Could not execute docker") from ex
     else:
         if check and result.returncode != 0:
             message = (result.stderr or result.stdout).strip()
-            logger.bind(args=args[:3], returncode=result.returncode, stderr=message).error(
+            log.bind(args=args[:3], returncode=result.returncode, stderr=message).error(
                 "Docker command failed"
             )
             raise DockerError(message or "Docker command failed")

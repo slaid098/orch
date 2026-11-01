@@ -8,7 +8,9 @@ from pathlib import Path
 
 from loguru import logger
 
-from orch.services.standards import StandardsError, validate_issue_body, validate_title
+from orch.exceptions.standards import StandardsError
+from orch.services.standards import validate_title
+from orch.services.standards.policy import validate_issue_body
 
 
 def main(argv: list[str] | None = None) -> int:

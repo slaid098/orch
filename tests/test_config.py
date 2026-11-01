@@ -4,7 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from orch.config import ConfigError, load_config
+from orch.config.settings import load_config
+from orch.exceptions.config import ConfigError
 
 
 def _write_config(tmp_path: Path, body: str) -> Path:

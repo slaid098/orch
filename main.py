@@ -7,7 +7,8 @@ from pathlib import Path
 
 from loguru import logger
 
-from orch.config import ConfigError, load_config
+from orch.config.settings import load_config
+from orch.exceptions.config import ConfigError
 from orch.services.daemon import initialize, run_daemon, run_once, setup_logging
 
 

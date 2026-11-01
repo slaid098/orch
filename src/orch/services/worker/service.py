@@ -4,31 +4,17 @@ from __future__ import annotations
 
 import subprocess
 import time
-from dataclasses import dataclass
 from pathlib import Path
 
-from loguru import logger
-
-from orch.config import Config
-from orch.docker import exec_in, start_worker, stop
-from orch.github import Issue
-from orch.schemas.standards.types import Handoff
+from orch.config.logger import get_logger
+from orch.exceptions.worker import AgentError
+from orch.schemas.config.types import Config
+from orch.schemas.github.types import Issue
+from orch.schemas.worker.types import WorkerResult
+from orch.services.docker import exec_in, start_worker, stop
 from orch.services.standards import branch_name, load_handoff
 
-
-class AgentError(RuntimeError):
-    """Raised when the worker cannot produce a usable result."""
-
-
-@dataclass(frozen=True)
-class WorkerResult:
-    """Artifacts produced by a successful worker attempt."""
-
-    run_dir: Path
-    branch: str
-    handoff: Handoff
-    tests_output: str
-    bundle_path: Path
+log = get_logger(component="worker")
 
 
 def build_prompt(
@@ -39,7 +25,7 @@ def build_prompt(
     previous_error: str | None = None,
 ) -> str:
     """Build the complete prompt sent to the worker agent."""
-    role_path = Path(__file__).parent / "prompts" / "worker.md"
+    role_path = Path(__file__).parent / "prompt.md"
     role = role_path.read_text(encoding="utf-8")
     setup = "\n".join(f"- `{command}`" for command in config.worker.setup_commands) or "- none"
     tests = "\n".join(f"- `{command}`" for command in config.worker.test_commands)
@@ -185,7 +171,7 @@ def _prepare_workspace(container: str, branch: str, deadline: float) -> str:
     base_sha = (result.stdout or "").strip().splitlines()[-1]
     if not base_sha:
         raise AgentError("Could not resolve the worker base commit")
-    logger.info("Prepared workspace on branch {} from {}", branch, base_sha[:12])
+    log.info("Prepared workspace on branch {} from {}", branch, base_sha[:12])
     return base_sha
 
 
@@ -226,11 +212,11 @@ def _run_claude(
         stderr_path=run_dir / "events.stderr.log",
     )
     if result.returncode != 0:
-        logger.bind(container=container, returncode=result.returncode).warning(
+        log.bind(container=container, returncode=result.returncode).warning(
             "Claude Code exited with a non-zero status; checking for changes"
         )
     else:
-        logger.info("Claude Code finished")
+        log.info("Claude Code finished")
 
 
 def _ensure_changes(container: str, base_sha: str, deadline: float) -> None:
@@ -251,7 +237,7 @@ def _ensure_changes(container: str, base_sha: str, deadline: float) -> None:
     has_commits = (commits.stdout or "").strip() not in {"", "0"}
     if not has_uncommitted and not has_commits:
         raise AgentError("Worker produced no changes")
-    logger.info(
+    log.info(
         "Worker changes detected (uncommitted={}, commits={})",
         has_uncommitted,
         has_commits,
@@ -282,7 +268,7 @@ def _finalize_commit(
     final_subject = (result.stdout or "").strip().splitlines()[-1]
     if final_subject != title:
         raise AgentError("Final commit message does not match the issue title")
-    logger.info("Finalized standardized commit: {}", title)
+    log.info("Finalized standardized commit: {}", title)
 
 
 def _write_diff(
@@ -302,7 +288,7 @@ def _write_diff(
         timeout=_remaining(deadline, cap=120),
     )
     if result.returncode != 0:
-        logger.bind(returncode=result.returncode).warning(
+        log.bind(returncode=result.returncode).warning(
             "Could not write diff.patch; continuing"
         )
 
@@ -323,11 +309,11 @@ def _run_tests(
     tests_path = run_dir / "tests.txt"
     output = tests_path.read_text(encoding="utf-8", errors="replace") if tests_path.exists() else ""
     if result.returncode != 0:
-        logger.bind(returncode=result.returncode, tests=output[-2000:]).error(
+        log.bind(returncode=result.returncode, tests=output[-2000:]).error(
             "Worker tests failed"
         )
         raise AgentError(f"Tests failed. See {tests_path}")
-    logger.info("Worker tests passed")
+    log.info("Worker tests passed")
     return output
 
 
@@ -372,7 +358,7 @@ def _exec_or_raise(
     )
     if result.returncode != 0:
         details = (result.stderr or result.stdout or "").strip()
-        logger.bind(label=label, returncode=result.returncode).error(
+        log.bind(label=label, returncode=result.returncode).error(
             "Worker step failed: {}", details[-2000:]
         )
         raise AgentError(f"{label} failed")
