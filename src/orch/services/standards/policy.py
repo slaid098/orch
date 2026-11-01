@@ -29,6 +29,7 @@ COMMIT_TYPES = (
     "perf",
 )
 TITLE_MAX_LENGTH = 72
+ISSUE_BODY_HEADINGS = ("## Что сделать", "## Почему")
 PR_HEADINGS = (
     "## Что сделано",
     "## Почему",
@@ -72,9 +73,72 @@ def validate_title(title: str) -> str:
     if not _TITLE_RE.fullmatch(value):
         raise StandardsError(
             "Title must match 'type(scope): description' with an allowed type, "
-            "a mandatory scope, and a non-empty description"
+            "a mandatory scope, and a non-empty description. Allowed types: "
+            + ", ".join(COMMIT_TYPES)
         )
     return value
+
+
+def validate_issue_body(body: str) -> str:
+    """Validate the issue body's required what/why sections.
+
+    Args:
+        body: Markdown issue body.
+
+    Returns:
+        The stripped body.
+
+    Raises:
+        StandardsError: If a required heading is missing, duplicated, or empty.
+    """
+    text = body.strip()
+    if not text:
+        raise StandardsError("Issue body must not be empty")
+
+    positions = []
+    for heading in ISSUE_BODY_HEADINGS:
+        first = text.find(heading)
+        if first < 0:
+            raise StandardsError(f"Issue body is missing heading {heading!r}")
+        if text.find(heading, first + len(heading)) >= 0:
+            raise StandardsError(f"Issue body contains duplicate heading {heading!r}")
+        positions.append(first)
+
+    if positions != sorted(positions):
+        raise StandardsError(
+            "Issue body headings must be ordered: "
+            + ", ".join(ISSUE_BODY_HEADINGS)
+        )
+
+    for index, heading in enumerate(ISSUE_BODY_HEADINGS):
+        start = positions[index] + len(heading)
+        end = positions[index + 1] if index + 1 < len(positions) else len(text)
+        if not text[start:end].strip():
+            raise StandardsError(f"Issue body section {heading!r} must not be empty")
+    return text
+
+
+def format_issue_body(what: str, why: str) -> str:
+    """Build the required issue body structure.
+
+    Args:
+        what: Concrete change or outcome.
+        why: Problem or reason for the change.
+
+    Returns:
+        Markdown body with the required headings.
+
+    Raises:
+        StandardsError: If either section is empty.
+    """
+    what_text = what.strip()
+    why_text = why.strip()
+    if not what_text or not why_text:
+        raise StandardsError("Issue body 'what' and 'why' sections must not be empty")
+    return (
+        f"{ISSUE_BODY_HEADINGS[0]}\n{what_text}\n\n"
+        f"{ISSUE_BODY_HEADINGS[1]}\n{why_text}\n"
+    )
 
 
 def parse_title(title: str) -> tuple[str, str, str]:

@@ -9,9 +9,11 @@ from orch.schemas.standards.types import Handoff
 from orch.services.standards import (
     StandardsError,
     branch_name,
+    format_issue_body,
     format_pr_body,
     load_handoff,
     validate_branch,
+    validate_issue_body,
     validate_title,
 )
 
@@ -43,6 +45,31 @@ def test_validate_title_accepts_conventional_title(title: str) -> None:
 def test_validate_title_rejects_invalid_titles(title: str) -> None:
     with pytest.raises(StandardsError):
         validate_title(title)
+
+
+def test_issue_body_requires_what_and_why() -> None:
+    body = format_issue_body(
+        "Добавить проверку заголовка.",
+        "Невалидные issue не должны запускать worker.",
+    )
+
+    assert validate_issue_body(body) == body.strip()
+    assert body.startswith("## Что сделать\n")
+    assert "## Почему\n" in body
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "Просто текст.",
+        "## Что сделать\n\n## Почему\nПричина.",
+        "## Почему\nПричина.\n\n## Что сделать\nДействие.",
+        "## Что сделать\nДействие.\n\n## Что сделать\nЕщё.\n\n## Почему\nПричина.",
+    ],
+)
+def test_issue_body_rejects_incomplete_sections(body: str) -> None:
+    with pytest.raises(StandardsError):
+        validate_issue_body(body)
 
 
 def test_format_pr_body_has_required_sections() -> None:
