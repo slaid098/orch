@@ -51,15 +51,36 @@ Create the issue on GitHub and add the `agent:queued` label. Run the daemon:
 uv run python main.py
 ```
 
-Debug one issue synchronously:
-
-```powershell
-uv run python main.py --issue 42 --once
-```
-
 The daemon runs at most `max_workers` containers (default 2, maximum 3) and
 waits for active workers on shutdown. On startup it removes orphan containers
 from a previous process and re-queues issues left in `agent:running`.
+
+## Live smoke test
+
+Verify the complete issue-to-PR path once, on a real worker container, without
+starting the daemon. Create a small issue with a valid conventional title (for
+example `docs(smoke): verify the pipeline`), note its number, and run:
+
+```powershell
+uv run python main.py --issue N --once
+```
+
+`--issue` and `--once` must be used together. The command selects the issue
+directly (the `agent:queued` label is not required), claims it
+(`agent:running`), runs the worker, validates and squashes the commit, runs
+`worker.test_commands`, pushes the branch, opens the pull request, and exits.
+It processes exactly one issue and never polls.
+
+- Exit code `0`: the pull request is open. The log prints its URL and the run
+  directory; the issue is labelled `agent:pr-open` and commented.
+- Exit code `1`: the issue is labelled `agent:needs-human`. Inspect the error,
+  `result.json`, and the worker logs in the printed run directory under
+  `data/runs/<owner>__<repo>/issue-N/<run-id>/`.
+
+A live run needs Docker, an authenticated `gh`, and the worker image built in
+[Setup](#setup). It makes up to `worker.max_attempts` attempts, each bounded by
+`worker.timeout_minutes`, so it can take a long time and consumes model quota.
+Close the smoke-test pull request, branch, and issue when done.
 
 ## Labels
 
