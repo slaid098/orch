@@ -116,9 +116,11 @@ def _run_git(
     else:
         if result.returncode != 0:
             message = _redact((result.stderr or result.stdout).strip(), secret)
-            logger.bind(args=args, returncode=result.returncode, stderr=message).error(
-                "Git command failed"
-            )
+            logger.bind(
+                args=_redact_args(args, secret),
+                returncode=result.returncode,
+                stderr=message,
+            ).error("Git command failed")
             raise GitError(message or "Git command failed")
         return result.stdout
 
@@ -127,3 +129,9 @@ def _redact(text: str, secret: str | None) -> str:
     if not secret:
         return text
     return text.replace(secret, "***")
+
+
+def _redact_args(args: list[str], secret: str | None) -> list[str]:
+    if not secret:
+        return args
+    return [arg.replace(secret, "***") for arg in args]

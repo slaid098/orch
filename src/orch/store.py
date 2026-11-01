@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import closing
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -13,7 +14,7 @@ from loguru import logger
 def init_db(db_path: Path) -> None:
     """Create the run-state database if it does not exist."""
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    with _connect(db_path) as conn:
+    with closing(_connect(db_path)) as conn:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS runs (
@@ -45,7 +46,7 @@ def create_run(
     branch: str,
 ) -> None:
     """Insert a new running run."""
-    with _connect(db_path) as conn:
+    with closing(_connect(db_path)) as conn:
         conn.execute(
             """
             INSERT INTO runs (id, repo, issue, status, branch, started_at)
@@ -66,7 +67,7 @@ def finish_run(
     error: str | None = None,
 ) -> None:
     """Mark a run as finished."""
-    with _connect(db_path) as conn:
+    with closing(_connect(db_path)) as conn:
         conn.execute(
             """
             UPDATE runs
@@ -81,7 +82,7 @@ def finish_run(
 
 def has_active_run(db_path: Path, repo: str, issue: int) -> bool:
     """Return whether a running run already exists for the issue."""
-    with _connect(db_path) as conn:
+    with closing(_connect(db_path)) as conn:
         row = conn.execute(
             "SELECT 1 FROM runs WHERE repo = ? AND issue = ? AND status = 'running' LIMIT 1",
             (repo, issue),
@@ -91,7 +92,7 @@ def has_active_run(db_path: Path, repo: str, issue: int) -> bool:
 
 def list_runs(db_path: Path, *, limit: int = 20) -> list[dict[str, Any]]:
     """Return recent runs, newest first."""
-    with _connect(db_path) as conn:
+    with closing(_connect(db_path)) as conn:
         rows = conn.execute(
             "SELECT * FROM runs ORDER BY started_at DESC LIMIT ?",
             (limit,),
@@ -105,7 +106,7 @@ def latest_run_for_issue(
     issue: int,
 ) -> dict[str, Any] | None:
     """Return the latest run for an issue, if any."""
-    with _connect(db_path) as conn:
+    with closing(_connect(db_path)) as conn:
         row = conn.execute(
             """
             SELECT * FROM runs

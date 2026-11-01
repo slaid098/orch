@@ -124,7 +124,6 @@ def _run_setup(container: str, config: Config) -> None:
         command,
         timeout=900,
         label="setup",
-        stdout_path=None,
     )
 
 

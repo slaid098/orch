@@ -16,7 +16,6 @@ from orch.gitops import authenticated_remote, import_bundle, push_branch
 from orch.github import Issue
 from orch.store import create_run, finish_run
 
-_STATUS_RUNNING = "running"
 _STATUS_PR_OPEN = "pr_open"
 _STATUS_PARKED = "parked"
 

@@ -323,13 +323,9 @@ def _run_gh(
         if check and result.returncode != 0:
             message = (result.stderr or result.stdout).strip()
             logger.bind(
-                args=_redact_args(args),
+                args=args[:3],
                 returncode=result.returncode,
                 stderr=message,
             ).error("GitHub CLI command failed")
             raise GitHubError(message or "GitHub CLI command failed")
         return result.stdout
-
-
-def _redact_args(args: list[str]) -> list[str]:
-    return [arg for arg in args if not arg.startswith("gh") or len(arg) < 40]

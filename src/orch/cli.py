@@ -9,7 +9,7 @@ from pathlib import Path
 
 from loguru import logger
 
-from orch import __version__, github, store
+from orch import github, store
 from orch.config import Config, ConfigError, load_config
 from orch.docker import DockerError, build_image
 from orch.pipeline import run_issue
