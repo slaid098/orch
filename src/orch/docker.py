@@ -74,8 +74,6 @@ def start_worker(
         f"{repo_path}:/src:ro",
         "-v",
         f"{run_dir}:/out",
-        "-v",
-        "orch-uv-cache:/home/agent/.cache/uv",
         "-e",
         "ANTHROPIC_BASE_URL=http://host.docker.internal:11434",
         "-e",
