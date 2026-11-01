@@ -8,8 +8,18 @@ import pytest
 from orch.standards import Handoff, StandardsError, format_pr_body, load_handoff, validate_title
 
 
-def test_validate_title_accepts_conventional_title() -> None:
-    assert validate_title("feat(cli): add version flag") == "feat(cli): add version flag"
+@pytest.mark.parametrize(
+    "title",
+    [
+        "feat(cli): add version flag",
+        "fix(pipeline): retry a failed attempt",
+        "build(docker): refresh the worker image",
+        "ci(github): run the test suite",
+        "revert(worker): roll back the prompt change",
+    ],
+)
+def test_validate_title_accepts_conventional_title(title: str) -> None:
+    assert validate_title(title) == title
 
 
 @pytest.mark.parametrize(
