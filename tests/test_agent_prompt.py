@@ -26,7 +26,7 @@ def _config(tmp_path: Path) -> Config:
 def test_build_prompt_contains_issue_and_commands(tmp_path: Path) -> None:
     issue = Issue(
         number=7,
-        title="Add a useful test",
+        title="test(worker): add a useful test",
         body="Please add a test.",
         url="https://example.test/issues/7",
         author="slaid098",
@@ -35,7 +35,7 @@ def test_build_prompt_contains_issue_and_commands(tmp_path: Path) -> None:
 
     prompt = build_prompt(_config(tmp_path), issue)
 
-    assert "#7: Add a useful test" in prompt
+    assert "#7: test(worker): add a useful test" in prompt
     assert "Please add a test." in prompt
     assert "uv sync --all-extras" in prompt
     assert "uv run pytest -q" in prompt

@@ -22,7 +22,12 @@ from orch.gitops import (
     refresh_mirror,
 )
 from orch.github import Issue
-from orch.standards import format_pr_body
+from orch.services.standards import (
+    StandardsError,
+    branch_name,
+    format_pr_body,
+    validate_title,
+)
 from orch.store import create_run, finish_run
 
 _STATUS_PR_OPEN = "pr_open"
@@ -63,11 +68,30 @@ def run_issue(
         so a daemon worker can release its slot and continue.
     """
     run_id = _new_run_id(issue.number)
-    branch = f"agent/{issue.number}"
     run_dir = _create_run_dir(config, issue, run_id)
     repo = config.repo.full_name
     db_path = config.data_dir / "orch.db"
     timeout_seconds = attempt_timeout_seconds or config.worker.timeout_minutes * 60
+
+    try:
+        title = validate_title(issue.title)
+        branch = branch_name(title, issue.number)
+    except StandardsError as ex:
+        create_run(
+            db_path,
+            run_id=run_id,
+            repo=repo,
+            issue=issue.number,
+            branch="",
+        )
+        _park_invalid_title(config, issue, token, run_dir, run_id, ex)
+        return RunOutcome(
+            run_id=run_id,
+            status=_STATUS_NEEDS_HUMAN,
+            run_dir=run_dir,
+            branch="",
+            error=str(ex),
+        )
 
     create_run(
         db_path,
@@ -134,7 +158,7 @@ def run_issue(
                     token,
                     head=worker.branch,
                     base=config.repo.base_branch,
-                    title=worker.handoff.title,
+                    title=title,
                     body=format_pr_body(worker.handoff, issue.number),
                 )
                 _best_effort_comment(
@@ -372,6 +396,56 @@ def _publish_branch(config: Config, worker: WorkerResult, token: str) -> None:
     bare = import_bundle(worker.bundle_path, worker.branch, worker.run_dir)
     remote = authenticated_remote(config.repo.owner, config.repo.name, token)
     push_branch(bare, worker.branch, remote, token)
+
+
+def _park_invalid_title(
+    config: Config,
+    issue: Issue,
+    token: str,
+    run_dir: Path,
+    run_id: str,
+    error: Exception,
+) -> None:
+    message = (
+        "orch не запустил worker: заголовок issue не соответствует стандарту.\n\n"
+        f"Текущий заголовок: `{issue.title}`\n\n"
+        f"Ошибка: `{type(error).__name__}: {error}`\n\n"
+        "Ожидаемый формат: `type(scope): description`. "
+        "Тип, scope и английское описание обязательны, длина — до 72 символов.\n"
+        f"Run: `{run_id}`\n"
+    )
+    try:
+        github.comment_issue(config.repo.full_name, issue.number, token, message)
+        github.edit_labels(
+            config.repo.full_name,
+            issue.number,
+            token,
+            add=(config.labels.needs_human,),
+            remove=(config.labels.running, config.labels.queued),
+        )
+    except Exception as notify_error:
+        logger.bind(
+            issue=issue.number,
+            error=notify_error,
+            error_type=type(notify_error).__name__,
+        ).error("Could not mark invalid issue title as needs-human")
+
+    _write_result(
+        run_dir,
+        {
+            "run_id": run_id,
+            "status": _STATUS_NEEDS_HUMAN,
+            "branch": "",
+            "error": f"{type(error).__name__}: {error}",
+            "attempts": 0,
+        },
+    )
+    finish_run(
+        config.data_dir / "orch.db",
+        run_id=run_id,
+        status=_STATUS_NEEDS_HUMAN,
+        error=f"{type(error).__name__}: {error}",
+    )
 
 
 def _park(

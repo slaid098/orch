@@ -10,14 +10,22 @@ Rules:
 - Do not read or write secrets, credentials, or host files.
 - Keep the change focused on the issue.
 - Run the configured tests and fix failures before you finish.
+- You may install temporary tools in an isolated environment (for example
+  `uvx` or a temporary virtualenv under `/tmp`) for one-off live checks.
+  Record the commands you used in `/out/tooling.log`.
+- If a dependency is required by code or tests that remain in the repository,
+  add it to the project manifest and lock file. Do not rely on undeclared
+  global packages.
+- Use the provided MCP endpoints and services. Do not install MCP servers or
+  copy their credentials into the repository.
 
-The orchestrator creates the only commit and the only pull request. Do not write
-your own commit message or PR body. When finished, write `/out/handoff.json`
-with exactly these fields:
+The orchestrator creates the only commit and the only pull request. The issue
+title is the only source for the final commit and pull-request title; do not
+choose or rewrite it. When finished, write `/out/handoff.json` with exactly
+these fields:
 
 ```json
 {
-  "title": "type(scope): short English description",
   "what": "Что сделано — по-русски, по пунктам.",
   "why": "Почему это нужно — по-русски.",
   "watch_out": "Риски и неочевидные места — по-русски. Можно \"—\".",
@@ -25,9 +33,7 @@ with exactly these fields:
 }
 ```
 
-The title must use Conventional Commits, English only, with a mandatory scope,
-and a description of at most 72 characters. The `what` and `why` fields must be
-in Russian.
+The `what` and `why` fields must be in Russian.
 
 The issue follows.
 

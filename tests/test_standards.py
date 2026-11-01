@@ -5,7 +5,15 @@ from pathlib import Path
 
 import pytest
 
-from orch.standards import Handoff, StandardsError, format_pr_body, load_handoff, validate_title
+from orch.schemas.standards.types import Handoff
+from orch.services.standards import (
+    StandardsError,
+    branch_name,
+    format_pr_body,
+    load_handoff,
+    validate_branch,
+    validate_title,
+)
 
 
 @pytest.mark.parametrize(
@@ -29,6 +37,7 @@ def test_validate_title_accepts_conventional_title(title: str) -> None:
         "feat: add version flag",
         "feat(cli): добавь версию",
         "chore(cli): " + "x" * 70,
+        "feat(cli): " + "x" * 62,
     ],
 )
 def test_validate_title_rejects_invalid_titles(title: str) -> None:
@@ -38,7 +47,6 @@ def test_validate_title_rejects_invalid_titles(title: str) -> None:
 
 def test_format_pr_body_has_required_sections() -> None:
     handoff = Handoff(
-        title="feat(cli): add version flag",
         what="Добавлен флаг версии.",
         why="Пользователю нужен способ проверить версию.",
         watch_out="—",
@@ -49,18 +57,46 @@ def test_format_pr_body_has_required_sections() -> None:
 
     assert body.startswith("## Что сделано\nДобавлен флаг версии.")
     assert "## Почему\nПользователю нужен способ проверить версию." in body
-    assert "## Watch out\n—" in body
-    assert "## Pending\nДобавить тест." in body
+    assert "## На что обратить внимание\n—" in body
+    assert "## Что осталось\nДобавить тест." in body
     assert body.rstrip().endswith("Closes #7")
+
+
+@pytest.mark.parametrize(
+    ("title", "issue", "branch"),
+    [
+        (
+            "feat(cli): add version flag",
+            7,
+            "feat/cli/issue-7-add-version-flag",
+        ),
+        (
+            "fix(worker): keep retries clean",
+            42,
+            "fix/worker/issue-42-keep-retries-clean",
+        ),
+    ],
+)
+def test_branch_name_uses_issue_title(
+    title: str,
+    issue: int,
+    branch: str,
+) -> None:
+    assert branch_name(title, issue) == branch
+    assert validate_branch(branch, issue) == branch
+
+
+def test_validate_branch_rejects_foreign_issue_number() -> None:
+    with pytest.raises(StandardsError):
+        validate_branch("feat/cli/issue-8-add-version-flag", 7)
 
 
 def test_load_handoff_reads_and_validates(tmp_path: Path) -> None:
     (tmp_path / "handoff.json").write_text(
         json.dumps(
             {
-                "title": "fix(worker): keep retries clean",
-                "what": "Попытки теперь начинаются с чистого клона.",
-                "why": "Старые изменения не должны влиять на новую попытку.",
+                "what": "Попытки продолжаются в той же рабочей папке.",
+                "why": "Сделанная работа не должна теряться при перезапуске.",
                 "watch_out": "",
                 "pending": "",
             },
@@ -71,7 +107,7 @@ def test_load_handoff_reads_and_validates(tmp_path: Path) -> None:
 
     handoff = load_handoff(tmp_path)
 
-    assert handoff.title == "fix(worker): keep retries clean"
+    assert handoff.what == "Попытки продолжаются в той же рабочей папке."
     assert handoff.watch_out == ""
 
 
@@ -82,7 +118,6 @@ def test_load_handoff_rejects_missing_file(tmp_path: Path) -> None:
 
 def test_format_pr_body_requires_russian_what_and_why() -> None:
     handoff = Handoff(
-        title="feat(cli): add version flag",
         what="Added a flag.",
         why="Users need it.",
         watch_out="—",

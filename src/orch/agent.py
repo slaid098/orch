@@ -10,9 +10,10 @@ from pathlib import Path
 from loguru import logger
 
 from orch.config import Config
-from orch.docker import DockerError, exec_in, start_worker, stop
+from orch.docker import exec_in, start_worker, stop
 from orch.github import Issue
-from orch.standards import Handoff, load_handoff
+from orch.schemas.standards.types import Handoff
+from orch.services.standards import branch_name, load_handoff
 
 
 class AgentError(RuntimeError):
@@ -53,6 +54,8 @@ def build_prompt(config: Config, issue: Issue) -> str:
         f"{tests}\n\n"
         "## Output contract\n"
         "Write `/out/handoff.json` exactly as described above. Do not commit.\n"
+        "The issue title is the only source for the final commit and pull-request "
+        "title; do not choose or rewrite it.\n"
     )
 
 
@@ -81,7 +84,7 @@ def run_worker(
         DockerError: If the container cannot be managed.
     """
     run_dir.mkdir(parents=True, exist_ok=True)
-    branch = f"agent/{issue.number}"
+    branch = branch_name(issue.title, issue.number)
     prompt = build_prompt(config, issue)
     (run_dir / "prompt.md").write_text(prompt, encoding="utf-8")
 
@@ -101,7 +104,7 @@ def run_worker(
         _run_claude(container, config, run_dir, deadline)
         _ensure_changes(container, base_sha, deadline)
         handoff = load_handoff(run_dir)
-        _finalize_commit(container, base_sha, handoff, run_dir, deadline)
+        _finalize_commit(container, base_sha, issue.title, run_dir, deadline)
         _write_diff(container, base_sha, run_dir, deadline)
         tests_output = _run_tests(container, config, run_dir, deadline)
         bundle = _bundle(container, branch, run_dir, deadline)
@@ -216,12 +219,12 @@ def _ensure_changes(container: str, base_sha: str, deadline: float) -> None:
 def _finalize_commit(
     container: str,
     base_sha: str,
-    handoff: Handoff,
+    title: str,
     run_dir: Path,
     deadline: float,
 ) -> None:
     """Replace any worker commits with one deterministic commit."""
-    (run_dir / "commit-message.txt").write_text(handoff.title + "\n", encoding="utf-8")
+    (run_dir / "commit-message.txt").write_text(title + "\n", encoding="utf-8")
     command = (
         f"cd /work && git reset --soft {base_sha} && "
         "git add -A && "
@@ -235,9 +238,9 @@ def _finalize_commit(
         label="finalize commit",
     )
     final_subject = (result.stdout or "").strip().splitlines()[-1]
-    if final_subject != handoff.title:
-        raise AgentError("Final commit message does not match the handoff title")
-    logger.info("Finalized standardized commit: {}", handoff.title)
+    if final_subject != title:
+        raise AgentError("Final commit message does not match the issue title")
+    logger.info("Finalized standardized commit: {}", title)
 
 
 def _write_diff(
