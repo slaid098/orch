@@ -3,7 +3,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from orch.gitops import (
+from orch.services.git import (
     cleanup_source,
     clone_source,
     import_bundle,

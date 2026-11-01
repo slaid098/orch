@@ -6,16 +6,19 @@ readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
     "loguru>=0.7.3",
+    "pydantic-settings>=2.0",
     "pyyaml>=6.0.2",
 ]
+
+[project.optional-dependencies]
+live = []
 
 [dependency-groups]
 dev = [
     "pytest>=8.3.0",
+    "pytest-cov>=6.0.0",
+    "ruff>=0.8.0",
 ]
-
-[project.scripts]
-orch = "orch.cli:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -26,4 +29,38 @@ packages = ["src/orch"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]
+pythonpath = ["src", "."]
+addopts = "-q --strict-markers -m \"not live\" --cov=orch --cov-fail-under=90 --cov-report=term-missing --cov-report=xml:coverage.xml"
+markers = [
+    "unit: fast tests without external services",
+    "integration: tests with real local components",
+    "live: tests against external services, not run in CI",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["orch"]
+
+[tool.coverage.report]
+show_missing = true
+
+[tool.ruff]
+target-version = "py314"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "UP", "B", "SIM"]
+
+[tool.audit]
+# Docker services are introduced with the server deployment phase.
+disable = ["docker_layout"]
+cov_fail_under = 90
+docstring_allowlist = ["services/"]
+ignore = [
+    { check_id = "service_entry_missing", path = "services/standards", reason = "policy.py is the single workflow rule source" },
+    { check_id = "sibling_import", path = "schemas/worker/types.py", reason = "Handoff is shared by worker and standards" },
+    { check_id = "sibling_import", path = "services/daemon/service.py", reason = "daemon composes docker and pipeline" },
+    { check_id = "sibling_import", path = "services/pipeline/service.py", reason = "pipeline composes worker and standards" },
+    { check_id = "sibling_import", path = "services/worker/service.py", reason = "worker composes docker and standards" },
+    { check_id = "door_unused_export", path = "services/daemon/__init__.py", reason = "root main.py is the production entrypoint" },
+]

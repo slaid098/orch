@@ -4,19 +4,18 @@ Minimal GitHub issue to pull request orchestrator for containerized coding agent
 
 `orch` watches GitHub issues labelled `agent:queued`, runs a worker container
 with Claude Code, validates a deterministic commit, runs the repository tests,
-pushes the branch, and opens a pull request. The pull request is reviewed and
-merged by a human (or by the assistant operating the repository).
+pushes the branch, and opens a pull request. A human reviews and merges it.
 
 ## What it does
 
-```
+```text
 GitHub issue with agent:queued
-  -> orch daemon claims it (agent:running)
-  -> a fresh clone of origin/main is prepared for the attempt
-  -> worker container implements the issue and writes /out/handoff.json
+  -> orch claims it (agent:running)
+  -> clones origin/main once for the issue
+  -> worker implements the issue in a persistent /work volume
   -> orch squashes all worker changes into one conventional commit
   -> orch runs the configured tests
-  -> orch imports the git bundle and pushes agent/<issue>
+  -> orch pushes type/scope/issue-N-description
   -> orch opens a standardized pull request
   -> a human merges it
 ```
@@ -24,10 +23,10 @@ GitHub issue with agent:queued
 The worker has no GitHub token. It cannot push or create pull requests. Only the
 orchestrator process touches GitHub.
 
-If any attempt hangs, crashes, or produces no pull request, the daemon discards
-that attempt and retries from a clean clone of the latest `origin/main`. After
-`worker.max_attempts` failures the issue gets `agent:needs-human` and a comment
-with the last error.
+If an attempt hangs, crashes, or produces no pull request, the worker container
+is replaced but the `/work` workspace is kept. The next attempt continues in the
+same directory with a fresh context and a short handoff. The workspace is deleted
+only after a pull request is created.
 
 ## Requirements
 
@@ -35,7 +34,7 @@ with the last error.
 - `uv`
 - Docker
 - `gh` authenticated as the repository owner
-- Claude Code available inside the worker image
+- Claude Code inside the worker image
 - An Ollama endpoint reachable from Docker at `host.docker.internal:11434`
 
 ## Setup
@@ -43,64 +42,60 @@ with the last error.
 ```powershell
 uv sync
 Copy-Item orch.yaml.example orch.yaml
-uv run orch build-image
+docker build -f docker/agent.Dockerfile -t orch-agent:latest .
 ```
 
-Create the issue on GitHub and add the `agent:queued` label. Then run the only
-production mode:
+Create the issue on GitHub and add the `agent:queued` label. Run the daemon:
 
 ```powershell
-uv run orch daemon
+uv run python main.py
 ```
 
-The daemon claims issues by replacing `agent:queued` with `agent:running`. It
-runs at most `max_workers` containers (default 2, maximum 3). On shutdown it
-waits for active workers. On startup it removes orphan containers from a
-previous process and re-queues issues left in `agent:running`.
+Debug one issue synchronously:
 
-## Commands
-
-```text
-orch run --issue N     Debug one issue synchronously.
-orch daemon            Production mode: poll queued issues and run a worker pool.
-orch status            Show recent runs.
-orch logs --issue N    Print the latest attempt logs for an issue.
-orch build-image       Build the worker Docker image.
+```powershell
+uv run python main.py --issue 42 --once
 ```
 
-There is no separate watchdog mode. Use a supervisor or the OS task scheduler
-if the daemon process itself must be restarted automatically.
+The daemon runs at most `max_workers` containers (default 2, maximum 3) and
+waits for active workers on shutdown. On startup it removes orphan containers
+from a previous process and re-queues issues left in `agent:running`.
 
 ## Labels
 
 - `agent:queued` — trigger for the daemon.
 - `agent:running` — an attempt or retry loop is active.
 - `agent:pr-open` — orch opened a pull request.
-- `agent:needs-human` — all attempts failed; inspect the issue comments.
+- `agent:needs-human` — the issue needs manual intervention.
 
-## Commit and PR standard
+## Standards
 
-The worker writes `/out/handoff.json`; it does not choose the final commit or PR.
-The finalizer validates the title, resets the worker branch to the attempt base,
-stages all changes, and creates exactly one commit.
+The issue title is the single source of truth:
 
-- Commit and PR title: `type(scope): English description`, at most 72 characters.
-- PR body, in Russian: `## Что сделано`, `## Почему`, `## Watch out`, `## Pending`.
-- The body ends with `Closes #N`.
+- Issue title: `type(scope): English description`, mandatory scope, at most
+  72 characters.
+- Branch: `type/scope/issue-N-kebab-description`.
+- Commit title and pull-request title: exactly the issue title.
+- One commit; no commit body, GPG signature, or `Signed-off-by`.
+- Pull-request body uses four Russian sections and ends with `Closes #N`.
+
+The executable source of workflow rules is
+`src/orch/services/standards/policy.py`. Architecture and code rules live in the
+external `audit` skill; do not copy them here.
 
 ## Configuration
 
 Copy `orch.yaml.example` to `orch.yaml` and adjust paths, labels, commands, and
-the model. `orch.yaml` and `data/` are intentionally ignored by git.
+the model. `orch.yaml` and `data/` are ignored by git.
 
-Each attempt fetches the base branch into a local bare mirror under `data_dir`,
-then creates a disposable clone for the worker. The worker never receives a
-GitHub token and never fetches from GitHub directly.
+The base branch is fetched into a local bare mirror under `data_dir`; the worker
+never receives a GitHub token and never fetches from GitHub directly.
 
 ## Security model
 
 - The worker runs in a disposable container.
-- `/src` is a read-only clone of the attempt's base revision.
+- `/src` is a read-only clone of the issue base revision.
+- `/work` is the persistent workspace, not readable by the orchestrator token.
 - The worker has no GitHub token and cannot push.
 - The worker writes a git bundle and handoff to `/out`.
 - The orchestrator validates the bundle, creates the commit, pushes the branch,
@@ -111,5 +106,4 @@ GitHub token and never fetches from GitHub directly.
 
 - Reviewer agent and automatic review loop
 - Auto-merge by the daemon
-- CI gate / branch protection
 - Multi-repository support

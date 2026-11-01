@@ -1,0 +1,23 @@
+"""Workflow standards constants."""
+
+COMMIT_TYPES = (
+    "feat",
+    "fix",
+    "build",
+    "chore",
+    "ci",
+    "docs",
+    "refactor",
+    "revert",
+    "test",
+    "style",
+    "perf",
+)
+TITLE_MAX_LENGTH = 72
+ISSUE_BODY_HEADINGS = ("## Что сделать", "## Почему")
+PR_HEADINGS = (
+    "## Что сделано",
+    "## Почему",
+    "## На что обратить внимание",
+    "## Что осталось",
+)
