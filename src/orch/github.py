@@ -315,6 +315,7 @@ def _run_gh(
     *,
     input_text: str | None = None,
     check: bool = True,
+    timeout: int = 120,
 ) -> str:
     env = os.environ.copy()
     env["GH_PROMPT_DISABLED"] = "1"
@@ -329,8 +330,14 @@ def _run_gh(
             text=True,
             encoding="utf-8",
             env=env,
+            timeout=timeout,
             check=False,
         )
+    except subprocess.TimeoutExpired as ex:
+        logger.bind(args=args[:3], timeout=timeout).error(
+            "GitHub CLI command timed out"
+        )
+        raise GitHubError(f"GitHub CLI command timed out after {timeout}s") from ex
     except OSError as ex:
         logger.bind(error=ex, error_type=type(ex).__name__).error(
             "Could not execute gh"
