@@ -32,8 +32,8 @@ RUN curl -fsSL "https://registry.npmjs.org/@anthropic-ai/claude-code-linux-x64/-
 RUN pip install --no-cache-dir uv
 
 RUN useradd -m -u 1000 agent \
-    && mkdir -p /work /out \
-    && chown -R agent:agent /work /out
+    && mkdir -p /work /out /home/agent \
+    && chown -R agent:agent /home/agent /work /out
 
 USER agent
 WORKDIR /work

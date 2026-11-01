@@ -30,7 +30,7 @@ def test_build_prompt_contains_issue_and_commands(tmp_path: Path) -> None:
         body="Please add a test.",
         url="https://example.test/issues/7",
         author="slaid098",
-        labels=("agent:ready",),
+        labels=("agent:queued",),
     )
 
     prompt = build_prompt(_config(tmp_path), issue)
@@ -39,4 +39,6 @@ def test_build_prompt_contains_issue_and_commands(tmp_path: Path) -> None:
     assert "Please add a test." in prompt
     assert "uv sync --all-extras" in prompt
     assert "uv run pytest -q" in prompt
-    assert "/out/summary.md" in prompt
+    assert "/out/handoff.json" in prompt
+    assert "Do not commit" in prompt
+    assert "\"watch_out\"" in prompt

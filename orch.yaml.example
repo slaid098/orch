@@ -6,15 +6,16 @@ repo:
   remote: origin
 
 labels:
-  ready: agent:ready
+  queued: agent:queued
   running: agent:running
-  parked: agent:parked
+  needs_human: agent:needs-human
   pr_open: agent:pr-open
 
 worker:
   image: orch-agent:latest
   model: deepseek-v4.1-flash:cloud
-  timeout_minutes: 45
+  timeout_minutes: 90
+  max_attempts: 2
   allowed_tools: "Read,Write,Edit,Bash,Glob,Grep"
   setup_commands:
     - uv sync --all-extras
@@ -23,3 +24,4 @@ worker:
 
 data_dir: D:/orch/data
 poll_interval_seconds: 30
+max_workers: 2

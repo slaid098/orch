@@ -10,12 +10,24 @@ Rules:
 - Do not read or write secrets, credentials, or host files.
 - Keep the change focused on the issue.
 - Run the configured tests and fix failures before you finish.
-- If you are blocked, explain why in `/out/summary.md`.
 
-When finished, write:
-- `/out/summary.md` — a short human-readable summary.
-- `/out/worker.json` — a JSON object with:
-  `{"status":"done","summary":"...","tests":"...","assumptions":["..."]}`
+The orchestrator creates the only commit and the only pull request. Do not write
+your own commit message or PR body. When finished, write `/out/handoff.json`
+with exactly these fields:
+
+```json
+{
+  "title": "type(scope): short English description",
+  "what": "Что сделано — по-русски, по пунктам.",
+  "why": "Почему это нужно — по-русски.",
+  "watch_out": "Риски и неочевидные места — по-русски. Можно \"—\".",
+  "pending": "Что осталось — по-русски. Можно \"—\"."
+}
+```
+
+The title must use Conventional Commits, English only, with a mandatory scope,
+and a description of at most 72 characters. The `what` and `why` fields must be
+in Russian.
 
 The issue follows.
 

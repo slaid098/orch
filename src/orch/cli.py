@@ -5,14 +5,15 @@ from __future__ import annotations
 import argparse
 import sys
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
 from loguru import logger
 
 from orch import __version__, github, store
 from orch.config import Config, ConfigError, load_config
-from orch.docker import DockerError, build_image
-from orch.pipeline import run_issue
+from orch.docker import DockerError, build_image, cleanup_managed
+from orch.pipeline import RunOutcome, run_issue
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -51,9 +52,13 @@ def main(argv: list[str] | None = None) -> int:
             config.repo.full_name,
             token,
             [
-                (config.labels.ready, "0e8a16", "Ready for orch"),
+                (config.labels.queued, "0e8a16", "Queued for orch"),
                 (config.labels.running, "fbca04", "orch is working on this issue"),
-                (config.labels.parked, "d73a4a", "orch parked this issue"),
+                (
+                    config.labels.needs_human,
+                    "d73a4a",
+                    "orch exhausted its attempts; a human must decide",
+                ),
                 (config.labels.pr_open, "1d76db", "orch opened a pull request"),
             ],
         )
@@ -150,48 +155,156 @@ def _run_once(config: Config, token: str, issue_number: int) -> int:
         print(f"Run directory: {outcome.run_dir}")
         return 0
 
-    print(f"Parked: {outcome.error}")
+    print(f"Needs human: {outcome.error}")
     print(f"Run directory: {outcome.run_dir}")
     return 1
 
 
 def _daemon(config: Config, token: str) -> int:
-    logger.info("Daemon started for {}", config.repo.full_name)
-    try:
-        while True:
-            try:
-                issues = github.list_ready_issues(
-                    config.repo.full_name,
-                    config.labels.ready,
-                    token,
-                )
-            except github.GitHubError as ex:
-                logger.bind(error=ex, error_type=type(ex).__name__).error(
-                    "Poll failed; retrying"
-                )
-                time.sleep(config.poll_interval_seconds)
-                continue
+    logger.info(
+        "Daemon started for {} with {} worker slot(s)",
+        config.repo.full_name,
+        config.max_workers,
+    )
+    _reconcile_startup(config, token)
+    db_path = config.data_dir / "orch.db"
+    active: dict[int, Future[RunOutcome]] = {}
 
-            for issue in issues:
-                if store.has_active_run(
-                    config.data_dir / "orch.db",
-                    config.repo.full_name,
-                    issue.number,
-                ):
+    with ThreadPoolExecutor(
+        max_workers=config.max_workers,
+        thread_name_prefix="orch",
+    ) as executor:
+        try:
+            while True:
+                _reap_finished(active)
+
+                try:
+                    issues = github.list_ready_issues(
+                        config.repo.full_name,
+                        config.labels.queued,
+                        token,
+                    )
+                except github.GitHubError as ex:
+                    logger.bind(error=ex, error_type=type(ex).__name__).error(
+                        "Poll failed; retrying"
+                    )
+                    time.sleep(config.poll_interval_seconds)
                     continue
-                logger.info("Claiming issue #{}: {}", issue.number, issue.title)
-                outcome = run_issue(config, issue, token)
-                logger.info(
-                    "Issue #{} finished with status {}",
-                    issue.number,
-                    outcome.status,
-                )
-                break
 
-            time.sleep(config.poll_interval_seconds)
-    except KeyboardInterrupt:
-        logger.info("Daemon stopped")
-        return 0
+                for issue in issues:
+                    if len(active) >= config.max_workers:
+                        break
+                    if issue.number in active:
+                        continue
+                    if store.has_active_run(
+                        db_path,
+                        config.repo.full_name,
+                        issue.number,
+                    ):
+                        continue
+
+                    if not _claim_issue(config, issue, token):
+                        continue
+                    logger.info("Claiming issue #{}: {}", issue.number, issue.title)
+                    active[issue.number] = executor.submit(
+                        run_issue,
+                        config,
+                        issue,
+                        token,
+                        claim=False,
+                    )
+
+                time.sleep(config.poll_interval_seconds)
+        except KeyboardInterrupt:
+            logger.info("Daemon stopping; waiting for active workers")
+            return 0
+
+
+def _reap_finished(active: dict[int, Future[RunOutcome]]) -> None:
+    for issue_number, future in list(active.items()):
+        if not future.done():
+            continue
+        try:
+            outcome = future.result()
+        except Exception as ex:
+            logger.bind(
+                issue=issue_number,
+                error=ex,
+                error_type=type(ex).__name__,
+            ).error("Unhandled issue worker failure")
+        else:
+            logger.info(
+                "Issue #{} finished with status {}",
+                issue_number,
+                outcome.status,
+            )
+        del active[issue_number]
+
+
+def _claim_issue(config: Config, issue: github.Issue, token: str) -> bool:
+    try:
+        github.edit_labels(
+            config.repo.full_name,
+            issue.number,
+            token,
+            add=(config.labels.running,),
+            remove=(config.labels.queued,),
+        )
+    except github.GitHubError as ex:
+        logger.bind(
+            issue=issue.number,
+            error=ex,
+            error_type=type(ex).__name__,
+        ).error("Could not claim issue")
+        return False
+    else:
+        return True
+
+
+def _reconcile_startup(config: Config, token: str) -> None:
+    cleanup_managed()
+    interrupted = store.interrupt_active_runs(
+        config.data_dir / "orch.db",
+        config.repo.full_name,
+    )
+    if interrupted:
+        logger.warning("Marked {} interrupted run(s) as interrupted", interrupted)
+
+    try:
+        issues = github.list_ready_issues(
+            config.repo.full_name,
+            config.labels.running,
+            token,
+        )
+    except github.GitHubError as ex:
+        logger.bind(error=ex, error_type=type(ex).__name__).warning(
+            "Could not reconcile running issues"
+        )
+        return
+
+    for issue in issues:
+        try:
+            github.comment_issue(
+                config.repo.full_name,
+                issue.number,
+                token,
+                "orch был перезапущен во время работы. Issue возвращена в очередь.",
+            )
+            github.edit_labels(
+                config.repo.full_name,
+                issue.number,
+                token,
+                add=(config.labels.queued,),
+                remove=(config.labels.running,),
+            )
+        except github.GitHubError as ex:
+            logger.bind(
+                issue=issue.number,
+                error=ex,
+                error_type=type(ex).__name__,
+            ).error("Could not requeue issue after restart")
+        else:
+            logger.info("Requeued issue #{} after daemon restart", issue.number)
 
 
 def _status(config: Config) -> int:
@@ -208,7 +321,7 @@ def _status(config: Config) -> int:
     for run in runs:
         error = (run.get("error") or "").splitlines()[0][:80]
         print(
-            f"{run['started_at'][:19]}  #{run['issue']:<4}  {run['status']:<8}  "
+            f"{run['started_at'][:19]}  #{run['issue']:<4}  {run['status']:<12}  "
             f"{run['branch']:<12}  {run.get('pr_url') or '-'}  {error}"
         )
     return 0
@@ -226,11 +339,13 @@ def _logs(config: Config, issue_number: int) -> int:
         return 0
 
     run_dir = _find_run_dir(config, issue_number, run["id"])
+    attempt_dirs = sorted(run_dir.glob("attempt-*"))
+    display_dir = attempt_dirs[-1] if attempt_dirs else run_dir
     print(f"Run: {run['id']}")
     print(f"Status: {run['status']}")
     print(f"Directory: {run_dir}")
     for name in ("tests.txt", "events.stderr.log"):
-        path = run_dir / name
+        path = display_dir / name
         if path.exists():
             print(f"\n--- {name} (tail) ---")
             print(_tail(path.read_text(encoding="utf-8", errors="replace"), 4000))
