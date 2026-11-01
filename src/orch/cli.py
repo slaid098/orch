@@ -248,7 +248,7 @@ def _claim_issue(config: Config, issue: github.Issue, token: str) -> bool:
             issue.number,
             token,
             add=(config.labels.running,),
-            remove=(config.labels.queued,),
+            remove=(config.labels.queued, config.labels.needs_human),
         )
     except github.GitHubError as ex:
         logger.bind(
@@ -295,7 +295,7 @@ def _reconcile_startup(config: Config, token: str) -> None:
                 issue.number,
                 token,
                 add=(config.labels.queued,),
-                remove=(config.labels.running,),
+                remove=(config.labels.running, config.labels.needs_human),
             )
         except github.GitHubError as ex:
             logger.bind(

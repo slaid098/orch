@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -89,13 +90,14 @@ def run_issue(
                 issue.number,
                 token,
                 add=(config.labels.running,),
-                remove=(config.labels.queued,),
+                remove=(config.labels.queued, config.labels.needs_human),
             )
 
         last_error: Exception | None = None
         for attempt in range(1, config.worker.max_attempts + 1):
             attempt_dir = run_dir / f"attempt-{attempt}"
             source: Path | None = None
+            attempt_started = time.monotonic()
             try:
                 logger.info(
                     "Issue #{} attempt {}/{}",
@@ -115,12 +117,16 @@ def run_issue(
                     config.repo.base_branch,
                     attempt_dir / "source",
                 )
+                remaining = _remaining_attempt_seconds(
+                    attempt_started,
+                    timeout_seconds,
+                )
                 worker = run_worker(
                     config,
                     issue,
                     attempt_dir,
                     source_path=source,
-                    timeout_seconds=timeout_seconds,
+                    timeout_seconds=remaining,
                 )
                 _publish_branch(config, worker, token)
                 pr_url = github.create_pr(
@@ -142,7 +148,7 @@ def run_issue(
                     issue.number,
                     token,
                     add=(config.labels.pr_open,),
-                    remove=(config.labels.running,),
+                    remove=(config.labels.running, config.labels.needs_human),
                 )
                 _write_result(
                     run_dir,
@@ -224,6 +230,13 @@ def run_issue(
         )
 
 
+def _remaining_attempt_seconds(started: float, budget_seconds: int) -> int:
+    remaining = budget_seconds - (time.monotonic() - started)
+    if remaining <= 0:
+        raise TimeoutError("Attempt timed out before the worker started")
+    return max(1, int(remaining))
+
+
 def _find_open_pr(repo: str, branch: str, token: str) -> str | None:
     try:
         return github.find_open_pr(repo, branch, token)
@@ -255,7 +268,11 @@ def _finish_existing_pr(
         issue.number,
         token,
         add=(config.labels.pr_open,),
-        remove=(config.labels.queued, config.labels.running),
+        remove=(
+            config.labels.queued,
+            config.labels.running,
+            config.labels.needs_human,
+        ),
     )
     _write_result(
         run_dir,
