@@ -42,3 +42,26 @@ def test_build_prompt_contains_issue_and_commands(tmp_path: Path) -> None:
     assert "/out/handoff.json" in prompt
     assert "Do not commit" in prompt
     assert "\"watch_out\"" in prompt
+
+
+def test_build_prompt_resumes_existing_workspace(tmp_path: Path) -> None:
+    issue = Issue(
+        number=8,
+        title="fix(worker): keep retry work",
+        body="Continue.",
+        url="https://example.test/issues/8",
+        author="slaid098",
+        labels=("agent:queued",),
+    )
+
+    prompt = build_prompt(
+        _config(tmp_path),
+        issue,
+        attempt=2,
+        previous_error="tests failed",
+    )
+
+    assert "## Resume" in prompt
+    assert "persistent" in prompt
+    assert "Do not re-clone" in prompt
+    assert "tests failed" in prompt

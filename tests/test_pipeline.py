@@ -55,7 +55,7 @@ def test_attempt_budget_covers_source_preparation() -> None:
         )
 
 
-def test_retry_uses_fresh_source_and_succeeds(
+def test_retry_reuses_source_and_workspace_and_succeeds(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -63,6 +63,10 @@ def test_retry_uses_fresh_source_and_succeeds(
     store.init_db(config.data_dir / "orch.db")
     issue = _issue()
     sources: list[Path] = []
+    workspaces: list[Path] = []
+    attempts: list[int] = []
+    previous_errors: list[str | None] = []
+    cleaned_sources: list[Path] = []
     comments: list[str] = []
     deleted: list[str] = []
     prs: list[dict[str, object]] = []
@@ -74,7 +78,11 @@ def test_retry_uses_fresh_source_and_succeeds(
         return destination
 
     monkeypatch.setattr(pipeline, "clone_source", clone_source)
-    monkeypatch.setattr(pipeline, "cleanup_source", lambda _source: None)
+    monkeypatch.setattr(
+        pipeline,
+        "cleanup_source",
+        lambda source: cleaned_sources.append(source),
+    )
     monkeypatch.setattr(pipeline, "_publish_branch", lambda *_args: None)
     monkeypatch.setattr(pipeline.github, "find_open_pr", lambda *_args: None)
     monkeypatch.setattr(
@@ -113,11 +121,17 @@ def test_retry_uses_fresh_source_and_succeeds(
         run_dir: Path,
         *,
         source_path: Path,
+        workspace_path: Path,
+        attempt: int,
+        previous_error: str | None,
         timeout_seconds: int,
     ) -> WorkerResult:
         assert 0 < timeout_seconds <= 10
         sources.append(source_path)
-        if len(sources) == 1:
+        workspaces.append(workspace_path)
+        attempts.append(attempt)
+        previous_errors.append(previous_error)
+        if attempt == 1:
             raise RuntimeError("first attempt broke")
         return WorkerResult(
             run_dir=run_dir,
@@ -139,7 +153,14 @@ def test_retry_uses_fresh_source_and_succeeds(
     assert outcome.status == "pr_open"
     assert outcome.pr_url == "https://example.test/pull/10"
     assert len(sources) == 2
-    assert sources[0] != sources[1]
+    assert sources[0] == sources[1]
+    assert len(set(workspaces)) == 1
+    assert workspaces[0] == (
+        config.data_dir / "workspaces" / "slaid098__orch" / "issue-9"
+    )
+    assert attempts == [1, 2]
+    assert previous_errors == [None, "first attempt broke"]
+    assert cleaned_sources == [sources[0]]
     assert deleted == ["fix/pipeline/issue-9-add-reliable-retry-path"]
     assert prs[0]["title"] == "fix(pipeline): add reliable retry path"
     assert "## Что сделано" in str(prs[0]["body"])

@@ -16,6 +16,7 @@ from orch.config import Config
 from orch.gitops import (
     authenticated_remote,
     cleanup_source,
+    cleanup_workspace,
     clone_source,
     import_bundle,
     push_branch,
@@ -117,117 +118,131 @@ def run_issue(
                 remove=(config.labels.queued, config.labels.needs_human),
             )
 
+        workspace = _workspace_path(config, issue)
+        source: Path | None = None
         last_error: Exception | None = None
-        for attempt in range(1, config.worker.max_attempts + 1):
-            attempt_dir = run_dir / f"attempt-{attempt}"
-            source: Path | None = None
-            attempt_started = time.monotonic()
-            try:
-                logger.info(
-                    "Issue #{} attempt {}/{}",
-                    issue.number,
-                    attempt,
-                    config.worker.max_attempts,
-                )
-                mirror = refresh_mirror(
-                    config.data_dir,
-                    config.repo.owner,
-                    config.repo.name,
-                    config.repo.base_branch,
-                    token,
-                )
-                source = clone_source(
-                    mirror,
-                    config.repo.base_branch,
-                    attempt_dir / "source",
-                )
-                remaining = _remaining_attempt_seconds(
-                    attempt_started,
-                    timeout_seconds,
-                )
-                worker = run_worker(
-                    config,
-                    issue,
-                    attempt_dir,
-                    source_path=source,
-                    timeout_seconds=remaining,
-                )
-                _publish_branch(config, worker, token)
-                pr_url = github.create_pr(
-                    repo,
-                    token,
-                    head=worker.branch,
-                    base=config.repo.base_branch,
-                    title=title,
-                    body=format_pr_body(worker.handoff, issue.number),
-                )
-                _best_effort_comment(
-                    repo,
-                    issue.number,
-                    token,
-                    _success_comment(worker, pr_url, run_id, attempt),
-                )
-                _best_effort_labels(
-                    repo,
-                    issue.number,
-                    token,
-                    add=(config.labels.pr_open,),
-                    remove=(config.labels.running, config.labels.needs_human),
-                )
-                _write_result(
-                    run_dir,
-                    {
-                        "run_id": run_id,
-                        "status": _STATUS_PR_OPEN,
-                        "branch": worker.branch,
-                        "pr_url": pr_url,
-                        "tests_passed": True,
-                        "attempts": attempt,
-                    },
-                )
-                finish_run(db_path, run_id=run_id, status=_STATUS_PR_OPEN, pr_url=pr_url)
-                logger.info("Issue #{} is ready for review: {}", issue.number, pr_url)
-                return RunOutcome(
-                    run_id=run_id,
-                    status=_STATUS_PR_OPEN,
-                    run_dir=run_dir,
-                    branch=worker.branch,
-                    pr_url=pr_url,
-                )
-            except Exception as ex:
-                last_error = ex
-                logger.bind(
-                    issue=issue.number,
-                    run_id=run_id,
-                    attempt=attempt,
-                    error=ex,
-                    error_type=type(ex).__name__,
-                ).error("Issue attempt failed")
-                _comment_attempt_failure(
-                    config, issue, token, attempt, ex
-                )
-                _delete_stale_branch(config, branch, token)
-            finally:
-                if source is not None:
-                    cleanup_source(source)
+        try:
+            mirror = refresh_mirror(
+                config.data_dir,
+                config.repo.owner,
+                config.repo.name,
+                config.repo.base_branch,
+                token,
+            )
+            source = clone_source(
+                mirror,
+                config.repo.base_branch,
+                run_dir / "source",
+            )
 
-        _park(
-            config,
-            issue,
-            token,
-            run_dir,
-            run_id,
-            branch,
-            last_error or RuntimeError("No attempt produced a pull request"),
-            attempts=config.worker.max_attempts,
-        )
-        return RunOutcome(
-            run_id=run_id,
-            status=_STATUS_NEEDS_HUMAN,
-            run_dir=run_dir,
-            branch=branch,
-            error=str(last_error or "No attempt produced a pull request"),
-        )
+            for attempt in range(1, config.worker.max_attempts + 1):
+                attempt_dir = run_dir / f"attempt-{attempt}"
+                attempt_started = time.monotonic()
+                try:
+                    logger.info(
+                        "Issue #{} attempt {}/{}",
+                        issue.number,
+                        attempt,
+                        config.worker.max_attempts,
+                    )
+                    remaining = _remaining_attempt_seconds(
+                        attempt_started,
+                        timeout_seconds,
+                    )
+                    worker = run_worker(
+                        config,
+                        issue,
+                        attempt_dir,
+                        source_path=source,
+                        workspace_path=workspace,
+                        attempt=attempt,
+                        previous_error=str(last_error) if last_error else None,
+                        timeout_seconds=remaining,
+                    )
+                    _publish_branch(config, worker, token)
+                    pr_url = github.create_pr(
+                        repo,
+                        token,
+                        head=worker.branch,
+                        base=config.repo.base_branch,
+                        title=title,
+                        body=format_pr_body(worker.handoff, issue.number),
+                    )
+                    _best_effort_comment(
+                        repo,
+                        issue.number,
+                        token,
+                        _success_comment(worker, pr_url, run_id, attempt),
+                    )
+                    _best_effort_labels(
+                        repo,
+                        issue.number,
+                        token,
+                        add=(config.labels.pr_open,),
+                        remove=(config.labels.running, config.labels.needs_human),
+                    )
+                    _write_result(
+                        run_dir,
+                        {
+                            "run_id": run_id,
+                            "status": _STATUS_PR_OPEN,
+                            "branch": worker.branch,
+                            "pr_url": pr_url,
+                            "tests_passed": True,
+                            "attempts": attempt,
+                        },
+                    )
+                    finish_run(
+                        db_path,
+                        run_id=run_id,
+                        status=_STATUS_PR_OPEN,
+                        pr_url=pr_url,
+                    )
+                    cleanup_workspace(workspace)
+                    logger.info(
+                        "Issue #{} is ready for review: {}",
+                        issue.number,
+                        pr_url,
+                    )
+                    return RunOutcome(
+                        run_id=run_id,
+                        status=_STATUS_PR_OPEN,
+                        run_dir=run_dir,
+                        branch=worker.branch,
+                        pr_url=pr_url,
+                    )
+                except Exception as ex:
+                    last_error = ex
+                    logger.bind(
+                        issue=issue.number,
+                        run_id=run_id,
+                        attempt=attempt,
+                        error=ex,
+                        error_type=type(ex).__name__,
+                    ).error("Issue attempt failed")
+                    _comment_attempt_failure(config, issue, token, attempt, ex)
+                    _delete_stale_branch(config, branch, token)
+
+            _park(
+                config,
+                issue,
+                token,
+                run_dir,
+                run_id,
+                branch,
+                last_error or RuntimeError("No attempt produced a pull request"),
+                attempts=config.worker.max_attempts,
+            )
+            return RunOutcome(
+                run_id=run_id,
+                status=_STATUS_NEEDS_HUMAN,
+                run_dir=run_dir,
+                branch=branch,
+                error=str(last_error or "No attempt produced a pull request"),
+            )
+        finally:
+            if source is not None:
+                cleanup_source(source)
     except Exception as ex:
         logger.bind(
             issue=issue.number,
@@ -259,6 +274,11 @@ def _remaining_attempt_seconds(started: float, budget_seconds: int) -> int:
     if remaining <= 0:
         raise TimeoutError("Attempt timed out before the worker started")
     return max(1, int(remaining))
+
+
+def _workspace_path(config: Config, issue: Issue) -> Path:
+    repo = f"{config.repo.owner}__{config.repo.name}"
+    return config.data_dir / "workspaces" / repo / f"issue-{issue.number}"
 
 
 def _find_open_pr(repo: str, branch: str, token: str) -> str | None:
@@ -314,6 +334,7 @@ def _finish_existing_pr(
         status=_STATUS_PR_OPEN,
         pr_url=pr_url,
     )
+    cleanup_workspace(_workspace_path(config, issue))
     return RunOutcome(
         run_id=run_id,
         status=_STATUS_PR_OPEN,
@@ -333,7 +354,7 @@ def _comment_attempt_failure(
     message = (
         f"Попытка {attempt}/{config.worker.max_attempts} не удалась.\n\n"
         f"`{type(error).__name__}: {str(error)[:1000]}`\n\n"
-        "Запускаю следующую попытку с чистым контекстом."
+        "Запускаю следующую попытку в том же workspace с новым контекстом."
     )
     try:
         github.comment_issue(config.repo.full_name, issue.number, token, message)

@@ -31,12 +31,19 @@ class WorkerResult:
     bundle_path: Path
 
 
-def build_prompt(config: Config, issue: Issue) -> str:
+def build_prompt(
+    config: Config,
+    issue: Issue,
+    *,
+    attempt: int = 1,
+    previous_error: str | None = None,
+) -> str:
     """Build the complete prompt sent to the worker agent."""
     role_path = Path(__file__).parent / "prompts" / "worker.md"
     role = role_path.read_text(encoding="utf-8")
     setup = "\n".join(f"- `{command}`" for command in config.worker.setup_commands) or "- none"
     tests = "\n".join(f"- `{command}`" for command in config.worker.test_commands)
+    resume = _resume_section(attempt, previous_error)
 
     return (
         f"{role}\n"
@@ -52,10 +59,25 @@ def build_prompt(config: Config, issue: Issue) -> str:
         f"{setup}\n\n"
         "Tests:\n"
         f"{tests}\n\n"
+        f"{resume}"
         "## Output contract\n"
         "Write `/out/handoff.json` exactly as described above. Do not commit.\n"
         "The issue title is the only source for the final commit and pull-request "
         "title; do not choose or rewrite it.\n"
+    )
+
+
+def _resume_section(attempt: int, previous_error: str | None) -> str:
+    if attempt <= 1:
+        return ""
+    error = previous_error or "unknown failure"
+    return (
+        "## Resume\n"
+        f"This is attempt {attempt}. The `/work` directory is persistent and "
+        "contains work from the previous attempt. Do not re-clone it, reset it, "
+        "or discard changes. Inspect `git status` and `git diff`, continue from "
+        "the existing state, and finish the issue.\n"
+        f"Previous failure: {error}\n\n"
     )
 
 
@@ -65,6 +87,9 @@ def run_worker(
     run_dir: Path,
     *,
     source_path: Path,
+    workspace_path: Path,
+    attempt: int = 1,
+    previous_error: str | None = None,
     timeout_seconds: int,
 ) -> WorkerResult:
     """Run one worker container and return its artifacts.
@@ -74,6 +99,9 @@ def run_worker(
         issue: Issue to implement.
         run_dir: Host directory mounted at ``/out``.
         source_path: Clean source checkout mounted read-only at ``/src``.
+        workspace_path: Persistent host workspace mounted at ``/work``.
+        attempt: One-based attempt number.
+        previous_error: Failure from the previous attempt, used for handoff.
         timeout_seconds: Hard budget for this whole attempt.
 
     Returns:
@@ -84,8 +112,14 @@ def run_worker(
         DockerError: If the container cannot be managed.
     """
     run_dir.mkdir(parents=True, exist_ok=True)
+    workspace_path.mkdir(parents=True, exist_ok=True)
     branch = branch_name(issue.title, issue.number)
-    prompt = build_prompt(config, issue)
+    prompt = build_prompt(
+        config,
+        issue,
+        attempt=attempt,
+        previous_error=previous_error,
+    )
     (run_dir / "prompt.md").write_text(prompt, encoding="utf-8")
 
     container = _container_name(run_dir)
@@ -94,6 +128,7 @@ def run_worker(
         image=config.worker.image,
         name=container,
         repo_path=source_path,
+        workspace_path=workspace_path,
         run_dir=run_dir,
         model=config.worker.model,
     )
@@ -126,13 +161,20 @@ def _container_name(run_dir: Path) -> str:
 
 def _prepare_workspace(container: str, branch: str, deadline: float) -> str:
     command = (
-        "export GIT_CONFIG_GLOBAL=/out/gitconfig && "
-        "git config --global --add safe.directory /src/.git && "
-        "git clone /src /work && "
-        'git config user.name "orch" && '
-        'git config user.email "orch@example.invalid" && '
-        f"git switch -c {branch} && "
-        "git rev-parse HEAD"
+        "set -e; "
+        "export GIT_CONFIG_GLOBAL=/out/gitconfig; "
+        "git config --global --add safe.directory /src/.git; "
+        "git config --global --add safe.directory /work; "
+        "if [ ! -d /work/.git ]; then git clone /src /work; fi; "
+        "cd /work; "
+        'git config user.name "orch"; '
+        'git config user.email "orch@example.invalid"; '
+        f"if git show-ref --verify --quiet refs/heads/{branch}; "
+        f"then git switch {branch}; else git switch -c {branch}; fi; "
+        "if git rev-parse --verify --quiet refs/tags/orch-base >/dev/null; "
+        "then base=$(git rev-parse refs/tags/orch-base); "
+        'else base=$(git rev-parse HEAD); git tag -f orch-base "$base"; fi; '
+        'printf "%s\\n" "$base"'
     )
     result = _exec_or_raise(
         container,

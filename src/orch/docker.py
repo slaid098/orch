@@ -44,6 +44,7 @@ def start_worker(
     image: str,
     name: str,
     repo_path: Path,
+    workspace_path: Path,
     run_dir: Path,
     model: str,
 ) -> str:
@@ -53,6 +54,7 @@ def start_worker(
         image: Worker image tag.
         name: Container name.
         repo_path: Host repository mounted read-only at ``/src``.
+        workspace_path: Persistent host workspace mounted at ``/work``.
         run_dir: Host run directory mounted at ``/out``.
         model: Ollama model name passed to Claude Code.
 
@@ -61,8 +63,18 @@ def start_worker(
     """
     if not image_exists(image):
         raise DockerError(
-            f"Worker image {image!r} does not exist. Run `orch build-image` first."
+            f"Worker image {image!r} does not exist. Build it with Docker."
         )
+
+    workspace_path.mkdir(parents=True, exist_ok=True)
+    try:
+        workspace_path.chmod(0o777)
+    except OSError as ex:
+        logger.bind(
+            path=str(workspace_path),
+            error=ex,
+            error_type=type(ex).__name__,
+        ).warning("Could not widen workspace permissions")
 
     args = [
         "docker",
@@ -76,6 +88,8 @@ def start_worker(
         f"orch.container={name}",
         "-v",
         f"{repo_path}:/src:ro",
+        "-v",
+        f"{workspace_path}:/work",
         "-v",
         f"{run_dir}:/out",
         "-e",

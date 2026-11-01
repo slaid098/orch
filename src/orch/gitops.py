@@ -65,10 +65,10 @@ def refresh_mirror(
 
 
 def clone_source(mirror: Path, base_branch: str, destination: Path) -> Path:
-    """Create a disposable working copy for one worker attempt.
+    """Create a disposable source checkout for one issue run.
 
     The copy is made from the local mirror; the worker never receives a
-    GitHub token.
+    GitHub token. It is cloned once per issue, not once per retry.
     """
     if destination.exists():
         _remove_tree(destination)
@@ -84,6 +84,15 @@ def clone_source(mirror: Path, base_branch: str, destination: Path) -> Path:
 
 def cleanup_source(destination: Path) -> None:
     """Remove a disposable worker source copy, ignoring missing paths."""
+    _remove_if_present(destination, label="worker source")
+
+
+def cleanup_workspace(destination: Path) -> None:
+    """Remove a persisted issue workspace after a pull request is created."""
+    _remove_if_present(destination, label="issue workspace")
+
+
+def _remove_if_present(destination: Path, *, label: str) -> None:
     try:
         _remove_tree(destination)
     except FileNotFoundError:
@@ -91,9 +100,9 @@ def cleanup_source(destination: Path) -> None:
     except OSError as ex:
         logger.bind(
             path=str(destination), error=ex, error_type=type(ex).__name__
-        ).warning("Could not remove worker source")
+        ).warning("Could not remove {}", label)
     else:
-        logger.debug("Removed worker source {}", destination)
+        logger.debug("Removed {} {}", label, destination)
 
 
 def _remove_tree(path: Path) -> None:
