@@ -132,6 +132,7 @@ def _run_claude(container: str, config: Config, run_dir: Path) -> None:
         "cd /work && "
         'claude -p "$(cat /out/prompt.md)" '
         "--output-format stream-json "
+        "--verbose "
         "--permission-mode bypassPermissions "
         "--permission-prompts none "
         f'--allowedTools "{config.worker.allowed_tools}" '
