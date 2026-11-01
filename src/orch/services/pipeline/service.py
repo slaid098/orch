@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from orch.config.logger import get_logger
+from orch.exceptions.github import GitHubError
 from orch.exceptions.standards import StandardsError
 from orch.schemas.config.types import Config
 from orch.schemas.github.types import Issue
@@ -207,7 +208,7 @@ def _workspace_path(config: Config, issue: Issue) -> Path:
 def _find_open_pr(repo: str, branch: str, token: str) -> str | None:
     try:
         return github.find_open_pr(repo, branch, token)
-    except github.GitHubError as ex:
+    except GitHubError as ex:
         log.bind(branch=branch, error=str(ex)).warning(
             "Could not check for an existing pull request"
         )
