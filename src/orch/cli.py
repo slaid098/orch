@@ -9,7 +9,7 @@ from pathlib import Path
 
 from loguru import logger
 
-from orch import github, store
+from orch import __version__, github, store
 from orch.config import Config, ConfigError, load_config
 from orch.docker import DockerError, build_image
 from orch.pipeline import run_issue
@@ -82,6 +82,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "--config",
         default="orch.yaml",
         help="Path to the configuration file (default: orch.yaml).",
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__}",
+        help="Show the orch version and exit.",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
