@@ -142,6 +142,55 @@ def test_load_handoff_rejects_missing_file(tmp_path: Path) -> None:
         load_handoff(tmp_path)
 
 
+def test_validate_title_rejects_multiline_input() -> None:
+    with pytest.raises(StandardsError, match="single line"):
+        validate_title("feat(cli): add\nflag")
+
+
+def test_issue_body_must_not_be_empty() -> None:
+    with pytest.raises(StandardsError, match="must not be empty"):
+        validate_issue_body("  ")
+
+
+def test_branch_name_requires_latin_description() -> None:
+    with pytest.raises(StandardsError, match="latin"):
+        branch_name("feat(cli): !!!", 7)
+
+
+def test_load_handoff_rejects_invalid_json(tmp_path: Path) -> None:
+    (tmp_path / "handoff.json").write_text("{", encoding="utf-8")
+
+    with pytest.raises(StandardsError, match="Could not read"):
+        load_handoff(tmp_path)
+
+
+def test_load_handoff_rejects_non_object(tmp_path: Path) -> None:
+    (tmp_path / "handoff.json").write_text("[]", encoding="utf-8")
+
+    with pytest.raises(StandardsError, match="JSON object"):
+        load_handoff(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"what": 1, "why": "Причина.", "watch_out": "", "pending": ""},
+        {"what": " ", "why": "Причина.", "watch_out": "", "pending": ""},
+    ],
+)
+def test_load_handoff_rejects_invalid_fields(
+    tmp_path: Path,
+    payload: dict[str, object],
+) -> None:
+    (tmp_path / "handoff.json").write_text(
+        json.dumps(payload, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(StandardsError):
+        load_handoff(tmp_path)
+
+
 def test_format_pr_body_requires_russian_what_and_why() -> None:
     handoff = Handoff(
         what="Added a flag.",

@@ -159,6 +159,124 @@ worker: {{}}
         load_config(config_path)
 
 
+def test_load_config_rejects_invalid_yaml(tmp_path: Path) -> None:
+    config_path = _write_config(tmp_path, "repo: [\n")
+
+    with pytest.raises(ConfigError, match="Could not read"):
+        load_config(config_path)
+
+
+def test_load_config_rejects_non_mapping_root(tmp_path: Path) -> None:
+    config_path = _write_config(tmp_path, "- item\n")
+
+    with pytest.raises(ConfigError, match="root must be a mapping"):
+        load_config(config_path)
+
+
+def test_load_config_rejects_missing_repo_path(tmp_path: Path) -> None:
+    config_path = _write_config(
+        tmp_path,
+        """
+repo:
+  owner: slaid098
+  name: orch
+  path: missing
+worker:
+  test_commands:
+    - pytest
+""",
+    )
+
+    with pytest.raises(ConfigError, match="does not exist"):
+        load_config(config_path)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        """
+repo: []
+worker:
+  test_commands:
+    - pytest
+""",
+        """
+repo:
+  owner: ""
+  name: orch
+  path: {repo_path}
+worker:
+  test_commands:
+    - pytest
+""",
+        """
+repo:
+  owner: slaid098
+  name: orch
+  path: {repo_path}
+labels:
+  queued: ""
+worker:
+  test_commands:
+    - pytest
+""",
+        """
+repo:
+  owner: slaid098
+  name: orch
+  path: {repo_path}
+worker:
+  test_commands: pytest
+""",
+        """
+repo:
+  owner: slaid098
+  name: orch
+  path: {repo_path}
+worker:
+  test_commands:
+    - ""
+""",
+    ],
+)
+def test_load_config_rejects_invalid_shapes(
+    tmp_path: Path,
+    body: str,
+) -> None:
+    repo_path = tmp_path / "repo"
+    (repo_path / ".git").mkdir(parents=True)
+    config_path = _write_config(tmp_path, body.format(repo_path=repo_path.as_posix()))
+
+    with pytest.raises(ConfigError):
+        load_config(config_path)
+
+
+def test_load_config_uses_github_token_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_path = tmp_path / "repo"
+    (repo_path / ".git").mkdir(parents=True)
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.setenv("GITHUB_TOKEN", " fallback ")
+    config_path = _write_config(
+        tmp_path,
+        f"""
+repo:
+  owner: slaid098
+  name: orch
+  path: {repo_path.as_posix()}
+worker:
+  test_commands:
+    - pytest
+""",
+    )
+
+    config = load_config(config_path)
+
+    assert config.gh_token == "fallback"
+
+
 def test_load_config_rejects_non_git_repo(tmp_path: Path) -> None:
     repo_path = tmp_path / "repo"
     repo_path.mkdir()

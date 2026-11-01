@@ -30,7 +30,7 @@ packages = ["src/orch"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src", "."]
-addopts = "-q --strict-markers -m \"not live\" --cov=orch --cov-fail-under=0 --cov-report=term-missing --cov-report=xml:coverage.xml"
+addopts = "-q --strict-markers -m \"not live\" --cov=orch --cov-fail-under=90 --cov-report=term-missing --cov-report=xml:coverage.xml"
 markers = [
     "unit: fast tests without external services",
     "integration: tests with real local components",
@@ -54,7 +54,7 @@ select = ["E4", "E7", "E9", "F", "I", "UP", "B", "SIM"]
 [tool.audit]
 # Docker services are introduced with the server deployment phase.
 disable = ["docker_layout"]
-cov_fail_under = 0
+cov_fail_under = 90
 docstring_allowlist = ["services/"]
 ignore = [
     { check_id = "service_entry_missing", path = "services/standards", reason = "policy.py is the single workflow rule source" },
