@@ -32,7 +32,7 @@ def import_bundle(bundle: Path, branch: str, run_dir: Path) -> Path:
 
     bare = run_dir / "push.git"
     _run_git(["init", "--bare", str(bare)], cwd=run_dir)
-    _run_git(["bundle", "verify", str(bundle)], cwd=run_dir)
+    _run_git(["bundle", "verify", str(bundle)], cwd=bare)
 
     ref = f"refs/heads/{branch}"
     heads = _run_git(["bundle", "list-heads", str(bundle)], cwd=run_dir)
