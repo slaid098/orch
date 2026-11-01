@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from loguru import logger
@@ -13,6 +13,7 @@ from loguru import logger
 from orch import github
 from orch.agent import WorkerResult, run_worker
 from orch.config import Config
+from orch.github import Issue
 from orch.gitops import (
     authenticated_remote,
     cleanup_source,
@@ -22,7 +23,6 @@ from orch.gitops import (
     push_branch,
     refresh_mirror,
 )
-from orch.github import Issue
 from orch.services.standards import (
     StandardsError,
     branch_name,
@@ -535,7 +535,7 @@ def _success_comment(
 
 
 def _new_run_id(issue: int) -> str:
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ").lower()
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ").lower()
     return f"{stamp}-{issue}"
 
 

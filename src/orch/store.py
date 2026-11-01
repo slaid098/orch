@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from contextlib import closing
 import sqlite3
-from datetime import datetime, timezone
+from contextlib import closing
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -147,4 +147,4 @@ def _connect(db_path: Path) -> sqlite3.Connection:
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()

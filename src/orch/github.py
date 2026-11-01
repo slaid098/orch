@@ -28,7 +28,7 @@ class Issue:
     labels: tuple[str, ...]
 
     @classmethod
-    def from_json(cls, data: dict[str, Any]) -> "Issue":
+    def from_json(cls, data: dict[str, Any]) -> Issue:
         """Build an issue from ``gh issue --json`` output."""
         author = data.get("author") or {}
         labels = tuple(
