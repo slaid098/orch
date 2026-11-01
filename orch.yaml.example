@@ -1,0 +1,25 @@
+repo:
+  owner: slaid098
+  name: orch
+  path: D:/Python projects/orch
+  base_branch: main
+  remote: origin
+
+labels:
+  ready: agent:ready
+  running: agent:running
+  parked: agent:parked
+  pr_open: agent:pr-open
+
+worker:
+  image: orch-agent:latest
+  model: deepseek-v4.1-flash:cloud
+  timeout_minutes: 45
+  allowed_tools: "Read,Write,Edit,Bash,Glob,Grep"
+  setup_commands:
+    - uv sync --all-extras
+  test_commands:
+    - uv run pytest -q
+
+data_dir: D:/orch/data
+poll_interval_seconds: 30
