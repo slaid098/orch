@@ -335,6 +335,74 @@ def test_exec_or_raise_reports_command_details(
         )
 
 
+def test_checkpoint_saves_patch_status_and_untracked_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[str] = []
+
+    def fake_exec(
+        _name: str,
+        command: str,
+        *,
+        timeout: int,
+        stdout_path: Path | None = None,
+        stderr_path: Path | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        del timeout, stdout_path, stderr_path
+        commands.append(command)
+        return _proc()
+
+    monkeypatch.setattr(worker, "exec_in", fake_exec)
+
+    worker._checkpoint(
+        "container",
+        "base123",
+        tmp_path,
+        time.monotonic() + 30,
+    )
+
+    assert len(commands) == 1
+    assert "checkpoint.patch" in commands[0]
+    assert "checkpoint.status" in commands[0]
+    assert "checkpoint-untracked.tar.gz" in commands[0]
+
+
+def test_checkpoint_failure_does_not_mask_attempt_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail(*_args: object, **_kwargs: object) -> None:
+        raise OSError("container is gone")
+
+    monkeypatch.setattr(worker, "exec_in", fail)
+
+    worker._checkpoint(
+        "container",
+        "base123",
+        tmp_path,
+        time.monotonic() + 30,
+    )
+
+
+def test_checkpoint_logs_non_zero_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        worker,
+        "exec_in",
+        lambda *_args, **_kwargs: _proc(stderr="tar failed", code=1),
+    )
+
+    worker._checkpoint(
+        "container",
+        "base123",
+        tmp_path,
+        time.monotonic() + 30,
+    )
+
+
 def test_container_name_is_safe() -> None:
     name = worker._container_name(Path("Issue 7") / "attempt 1")
 

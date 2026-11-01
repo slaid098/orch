@@ -110,6 +110,7 @@ def run_worker(
 
     container = _container_name(run_dir)
     deadline = time.monotonic() + timeout_seconds
+    base_sha: str | None = None
     start_worker(
         image=config.worker.image,
         name=container,
@@ -136,8 +137,48 @@ def run_worker(
             tests_output=tests_output,
             bundle_path=bundle,
         )
+    except Exception:
+        if base_sha is not None:
+            _checkpoint(container, base_sha, run_dir, deadline)
+        raise
     finally:
         stop(container)
+
+
+def _checkpoint(
+    container: str,
+    base_sha: str,
+    run_dir: Path,
+    deadline: float,
+) -> None:
+    """Save tracked and untracked work before replacing the container."""
+    command = (
+        "cd /work && "
+        f"git diff --binary {base_sha} > /out/checkpoint.patch; "
+        "git status --porcelain=v1 > /out/checkpoint.status; "
+        "git ls-files --others --exclude-standard -z "
+        "| tar --null -T - -czf /out/checkpoint-untracked.tar.gz"
+    )
+    try:
+        result = exec_in(
+            container,
+            command,
+            timeout=_remaining(deadline, cap=120),
+        )
+    except Exception as ex:
+        log.bind(
+            container=container,
+            error=ex,
+            error_type=type(ex).__name__,
+        ).warning("Could not write worker checkpoint")
+        return
+    if result.returncode != 0:
+        details = (result.stderr or result.stdout or "").strip()
+        log.bind(container=container, returncode=result.returncode).warning(
+            "Worker checkpoint failed: {}", details[-1000:]
+        )
+        return
+    log.info("Wrote worker checkpoint to {}", run_dir)
 
 
 def _container_name(run_dir: Path) -> str:

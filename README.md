@@ -24,9 +24,12 @@ The worker has no GitHub token. It cannot push or create pull requests. Only the
 orchestrator process touches GitHub.
 
 If an attempt hangs, crashes, or produces no pull request, the worker container
-is replaced but the `/work` workspace is kept. The next attempt continues in the
-same directory with a fresh context and a short handoff. The workspace is deleted
-only after a pull request is created.
+is replaced but the `/work` workspace is kept. Before it stops the container,
+orch writes `checkpoint.patch`, `checkpoint.status`, and
+`checkpoint-untracked.tar.gz` into the attempt directory, so tracked and
+untracked work can be recovered even if the workspace is damaged. The next
+attempt continues in the same directory with a fresh context and a short
+handoff. The workspace is deleted only after a pull request is created.
 
 ## Requirements
 
