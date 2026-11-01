@@ -90,6 +90,28 @@ def has_active_run(db_path: Path, repo: str, issue: int) -> bool:
     return row is not None
 
 
+def interrupt_active_runs(db_path: Path, repo: str) -> int:
+    """Mark all running runs for a repository as interrupted.
+
+    Returns:
+        Number of runs changed.
+    """
+    with closing(_connect(db_path)) as conn:
+        cursor = conn.execute(
+            """
+            UPDATE runs
+            SET status = 'interrupted', finished_at = ?, error = ?
+            WHERE repo = ? AND status = 'running'
+            """,
+            (_now(), "orch restarted during the run", repo),
+        )
+        conn.commit()
+        count = cursor.rowcount
+    if count:
+        logger.warning("Interrupted {} active run(s) for {}", count, repo)
+    return count
+
+
 def list_runs(db_path: Path, *, limit: int = 20) -> list[dict[str, Any]]:
     """Return recent runs, newest first."""
     with closing(_connect(db_path)) as conn:

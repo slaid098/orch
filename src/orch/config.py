@@ -35,9 +35,9 @@ class RepoConfig:
 class LabelsConfig:
     """Labels used to move an issue through the pipeline."""
 
-    ready: str = "agent:ready"
+    queued: str = "agent:queued"
     running: str = "agent:running"
-    parked: str = "agent:parked"
+    needs_human: str = "agent:needs-human"
     pr_open: str = "agent:pr-open"
 
 
@@ -47,7 +47,8 @@ class WorkerConfig:
 
     image: str = "orch-agent:latest"
     model: str = "deepseek-v4.1-flash:cloud"
-    timeout_minutes: int = 45
+    timeout_minutes: int = 90
+    max_attempts: int = 2
     allowed_tools: str = "Read,Write,Edit,Bash,Glob,Grep"
     setup_commands: tuple[str, ...] = ()
     test_commands: tuple[str, ...] = ()
@@ -62,6 +63,7 @@ class Config:
     worker: WorkerConfig
     data_dir: Path
     poll_interval_seconds: int = 30
+    max_workers: int = 2
     gh_token: str | None = None
 
 
@@ -113,9 +115,9 @@ def _parse_config(raw: dict[str, Any], base_dir: Path) -> Config:
 
     labels_raw = _mapping(raw.get("labels", {}), "labels")
     labels = LabelsConfig(
-        ready=_optional_str(labels_raw, "ready", "agent:ready"),
+        queued=_optional_str(labels_raw, "queued", "agent:queued"),
         running=_optional_str(labels_raw, "running", "agent:running"),
-        parked=_optional_str(labels_raw, "parked", "agent:parked"),
+        needs_human=_optional_str(labels_raw, "needs_human", "agent:needs-human"),
         pr_open=_optional_str(labels_raw, "pr_open", "agent:pr-open"),
     )
 
@@ -133,7 +135,10 @@ def _parse_config(raw: dict[str, Any], base_dir: Path) -> Config:
         image=_optional_str(worker_raw, "image", "orch-agent:latest"),
         model=_optional_str(worker_raw, "model", "deepseek-v4.1-flash:cloud"),
         timeout_minutes=_positive_int(
-            worker_raw.get("timeout_minutes", 45), "worker.timeout_minutes"
+            worker_raw.get("timeout_minutes", 90), "worker.timeout_minutes"
+        ),
+        max_attempts=_positive_int(
+            worker_raw.get("max_attempts", 2), "worker.max_attempts"
         ),
         allowed_tools=_optional_str(
             worker_raw, "allowed_tools", "Read,Write,Edit,Bash,Glob,Grep"
@@ -148,6 +153,9 @@ def _parse_config(raw: dict[str, Any], base_dir: Path) -> Config:
     )
     poll_interval_seconds = _positive_int(
         raw.get("poll_interval_seconds", 30), "poll_interval_seconds"
+    )
+    max_workers = _bounded_int(
+        raw.get("max_workers", 2), "max_workers", minimum=1, maximum=3
     )
 
     token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
@@ -165,6 +173,7 @@ def _parse_config(raw: dict[str, Any], base_dir: Path) -> Config:
         worker=worker,
         data_dir=data_dir,
         poll_interval_seconds=poll_interval_seconds,
+        max_workers=max_workers,
         gh_token=token,
     )
 
@@ -210,6 +219,13 @@ def _positive_int(value: Any, name: str) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
         raise ConfigError(f"{name} must be a positive integer")
     return value
+
+
+def _bounded_int(value: Any, name: str, *, minimum: int, maximum: int) -> int:
+    number = _positive_int(value, name)
+    if not minimum <= number <= maximum:
+        raise ConfigError(f"{name} must be between {minimum} and {maximum}")
+    return number
 
 
 def _resolve_path(value: str, base_dir: Path) -> Path:

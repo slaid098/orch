@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import os
+import shutil
+import stat
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 
 from loguru import logger
@@ -11,6 +14,98 @@ from loguru import logger
 
 class GitError(RuntimeError):
     """Raised when a git operation fails."""
+
+
+def refresh_mirror(
+    data_dir: Path,
+    owner: str,
+    name: str,
+    base_branch: str,
+    token: str,
+) -> Path:
+    """Fetch the latest base branch into a persistent bare mirror.
+
+    Args:
+        data_dir: Local orch data directory.
+        owner: Repository owner.
+        name: Repository name.
+        base_branch: Branch the worker should start from.
+        token: GitHub token used only for the fetch URL.
+
+    Returns:
+        Path to the bare mirror.
+    """
+    mirror = data_dir / "mirrors" / f"{owner}__{name}.git"
+    mirror.parent.mkdir(parents=True, exist_ok=True)
+    if not (mirror / "HEAD").exists():
+        _run_git(["init", "--bare", str(mirror)], cwd=mirror.parent)
+
+    base_ref = f"refs/heads/{base_branch}"
+    _run_git(["--git-dir", str(mirror), "symbolic-ref", "HEAD", base_ref], cwd=mirror)
+    remote = authenticated_remote(owner, name, token)
+    env = os.environ.copy()
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GH_PROMPT_DISABLED"] = "1"
+    _run_git(
+        [
+            "--git-dir",
+            str(mirror),
+            "fetch",
+            "--prune",
+            remote,
+            f"+{base_ref}:{base_ref}",
+        ],
+        cwd=mirror.parent,
+        env=env,
+        secret=token,
+    )
+    _run_git(["--git-dir", str(mirror), "rev-parse", base_ref], cwd=mirror)
+    logger.info("Refreshed source mirror to {}/{}", owner, name)
+    return mirror
+
+
+def clone_source(mirror: Path, base_branch: str, destination: Path) -> Path:
+    """Create a disposable working copy for one worker attempt.
+
+    The copy is made from the local mirror; the worker never receives a
+    GitHub token.
+    """
+    if destination.exists():
+        _remove_tree(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    _run_git(
+        ["clone", "--no-hardlinks", str(mirror), str(destination)],
+        cwd=destination.parent,
+    )
+    _run_git(["checkout", base_branch], cwd=destination)
+    logger.info("Created worker source at {}", destination)
+    return destination
+
+
+def cleanup_source(destination: Path) -> None:
+    """Remove a disposable worker source copy, ignoring missing paths."""
+    try:
+        _remove_tree(destination)
+    except FileNotFoundError:
+        return
+    except OSError as ex:
+        logger.bind(
+            path=str(destination), error=ex, error_type=type(ex).__name__
+        ).warning("Could not remove worker source")
+    else:
+        logger.debug("Removed worker source {}", destination)
+
+
+def _remove_tree(path: Path) -> None:
+    def make_writable(
+        function: Callable[[str], None],
+        target: str,
+        _: object,
+    ) -> None:
+        os.chmod(target, stat.S_IWRITE)
+        function(target)
+
+    shutil.rmtree(path, onerror=make_writable)
 
 
 def import_bundle(bundle: Path, branch: str, run_dir: Path) -> Path:
@@ -96,6 +191,7 @@ def _run_git(
     cwd: Path,
     env: dict[str, str] | None = None,
     secret: str | None = None,
+    timeout: int = 600,
 ) -> str:
     try:
         result = subprocess.run(
@@ -106,8 +202,15 @@ def _run_git(
             encoding="utf-8",
             errors="replace",
             env=env,
+            timeout=timeout,
             check=False,
         )
+    except subprocess.TimeoutExpired as ex:
+        logger.bind(
+            args=_redact_args(args, secret),
+            timeout=timeout,
+        ).error("Git command timed out")
+        raise GitError(f"Git command timed out after {timeout}s") from ex
     except OSError as ex:
         logger.bind(error=ex, error_type=type(ex).__name__).error(
             "Could not execute git"

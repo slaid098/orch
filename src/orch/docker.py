@@ -70,6 +70,10 @@ def start_worker(
         "-d",
         "--name",
         name,
+        "--label",
+        "orch.managed=true",
+        "--label",
+        f"orch.container={name}",
         "-v",
         f"{repo_path}:/src:ro",
         "-v",
@@ -182,6 +186,20 @@ def exec_in(
             stdout_file.close()
         if stderr_file:
             stderr_file.close()
+
+
+def cleanup_managed() -> None:
+    """Remove worker containers left by a previous orch process."""
+    result = _run(
+        ["docker", "ps", "-aq", "--filter", "label=orch.managed=true"],
+        timeout=60,
+        check=False,
+    )
+    container_ids = (result.stdout or "").split()
+    for container_id in container_ids:
+        _run(["docker", "rm", "-f", container_id], timeout=60, check=False)
+    if container_ids:
+        logger.info("Removed {} orphan worker container(s)", len(container_ids))
 
 
 def stop(name: str) -> None:

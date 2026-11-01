@@ -7,6 +7,7 @@ import os
 import subprocess
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import quote
 
 from loguru import logger
 
@@ -250,6 +251,22 @@ def find_open_pr(repo: str, head: str, token: str) -> str | None:
             if item.get("headRefName") == head and item.get("url"):
                 return str(item["url"])
         return None
+
+
+def delete_branch(repo: str, branch: str, token: str) -> None:
+    """Delete a stale remote branch, ignoring an already-missing ref."""
+    ref = quote(branch, safe="")
+    try:
+        _run_gh(
+            ["api", "--method", "DELETE", f"repos/{repo}/git/refs/heads/{ref}"],
+            token,
+        )
+    except GitHubError as ex:
+        logger.bind(branch=branch, error=str(ex)).warning(
+            "Could not delete stale branch (it may not exist)"
+        )
+    else:
+        logger.info("Deleted stale branch {}", branch)
 
 
 def create_pr(

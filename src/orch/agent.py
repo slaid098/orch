@@ -1,8 +1,9 @@
-"""Worker container orchestration for one issue."""
+"""Worker container orchestration for one issue attempt."""
 
 from __future__ import annotations
 
-import json
+import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -11,6 +12,7 @@ from loguru import logger
 from orch.config import Config
 from orch.docker import DockerError, exec_in, start_worker, stop
 from orch.github import Issue
+from orch.standards import Handoff, load_handoff
 
 
 class AgentError(RuntimeError):
@@ -19,11 +21,11 @@ class AgentError(RuntimeError):
 
 @dataclass(frozen=True)
 class WorkerResult:
-    """Artifacts produced by a successful worker run."""
+    """Artifacts produced by a successful worker attempt."""
 
     run_dir: Path
     branch: str
-    summary: str
+    handoff: Handoff
     tests_output: str
     bundle_path: Path
 
@@ -50,17 +52,26 @@ def build_prompt(config: Config, issue: Issue) -> str:
         "Tests:\n"
         f"{tests}\n\n"
         "## Output contract\n"
-        "Write `/out/summary.md` and `/out/worker.json` as described above.\n"
+        "Write `/out/handoff.json` exactly as described above. Do not commit.\n"
     )
 
 
-def run_worker(config: Config, issue: Issue, run_dir: Path) -> WorkerResult:
+def run_worker(
+    config: Config,
+    issue: Issue,
+    run_dir: Path,
+    *,
+    source_path: Path,
+    timeout_seconds: int,
+) -> WorkerResult:
     """Run one worker container and return its artifacts.
 
     Args:
         config: Orchestrator configuration.
         issue: Issue to implement.
         run_dir: Host directory mounted at ``/out``.
+        source_path: Clean source checkout mounted read-only at ``/src``.
+        timeout_seconds: Hard budget for this whole attempt.
 
     Returns:
         Successful worker result.
@@ -74,29 +85,30 @@ def run_worker(config: Config, issue: Issue, run_dir: Path) -> WorkerResult:
     prompt = build_prompt(config, issue)
     (run_dir / "prompt.md").write_text(prompt, encoding="utf-8")
 
-    container = f"orch-{run_dir.name.lower()}"
+    container = _container_name(run_dir)
+    deadline = time.monotonic() + timeout_seconds
     start_worker(
         image=config.worker.image,
         name=container,
-        repo_path=config.repo.path,
+        repo_path=source_path,
         run_dir=run_dir,
         model=config.worker.model,
     )
 
     try:
-        _prepare_workspace(container, branch, config)
-        _run_setup(container, config)
-        _run_claude(container, config, run_dir)
-        _ensure_changes(container, config)
-        _commit_if_needed(container, issue)
-        _write_diff(container, config, run_dir)
-        tests_output = _run_tests(container, config, run_dir)
-        bundle = _bundle(container, branch, run_dir)
-        summary = _read_summary(run_dir, issue)
+        base_sha = _prepare_workspace(container, branch, deadline)
+        _run_setup(container, config, deadline)
+        _run_claude(container, config, run_dir, deadline)
+        _ensure_changes(container, base_sha, deadline)
+        handoff = load_handoff(run_dir)
+        _finalize_commit(container, base_sha, handoff, run_dir, deadline)
+        _write_diff(container, base_sha, run_dir, deadline)
+        tests_output = _run_tests(container, config, run_dir, deadline)
+        bundle = _bundle(container, branch, run_dir, deadline)
         return WorkerResult(
             run_dir=run_dir,
             branch=branch,
-            summary=summary,
+            handoff=handoff,
             tests_output=tests_output,
             bundle_path=bundle,
         )
@@ -104,31 +116,52 @@ def run_worker(config: Config, issue: Issue, run_dir: Path) -> WorkerResult:
         stop(container)
 
 
-def _prepare_workspace(container: str, branch: str, config: Config) -> None:
+def _container_name(run_dir: Path) -> str:
+    name = f"orch-{run_dir.parent.name}-{run_dir.name}".lower()
+    return "".join(char if char.isalnum() or char in "-_." else "-" for char in name)[:63]
+
+
+def _prepare_workspace(container: str, branch: str, deadline: float) -> str:
     command = (
+        "export GIT_CONFIG_GLOBAL=/out/gitconfig && "
         "git config --global --add safe.directory /src/.git && "
         "git clone /src /work && "
         'git config user.name "orch" && '
         'git config user.email "orch@example.invalid" && '
-        f"git switch -c {branch}"
+        f"git switch -c {branch} && "
+        "git rev-parse HEAD"
     )
-    _exec_or_raise(container, command, timeout=300, label="prepare workspace")
-    logger.info("Prepared workspace on branch {}", branch)
+    result = _exec_or_raise(
+        container,
+        command,
+        timeout=_remaining(deadline, cap=300),
+        label="prepare workspace",
+    )
+    base_sha = (result.stdout or "").strip().splitlines()[-1]
+    if not base_sha:
+        raise AgentError("Could not resolve the worker base commit")
+    logger.info("Prepared workspace on branch {} from {}", branch, base_sha[:12])
+    return base_sha
 
 
-def _run_setup(container: str, config: Config) -> None:
+def _run_setup(container: str, config: Config, deadline: float) -> None:
     if not config.worker.setup_commands:
         return
     command = "cd /work && " + " && ".join(config.worker.setup_commands)
     _exec_or_raise(
         container,
         command,
-        timeout=900,
+        timeout=_remaining(deadline, cap=900),
         label="setup",
     )
 
 
-def _run_claude(container: str, config: Config, run_dir: Path) -> None:
+def _run_claude(
+    container: str,
+    config: Config,
+    run_dir: Path,
+    deadline: float,
+) -> None:
     command = (
         "cd /work && "
         'claude -p "$(cat /out/prompt.md)" '
@@ -143,7 +176,7 @@ def _run_claude(container: str, config: Config, run_dir: Path) -> None:
     result = exec_in(
         container,
         command,
-        timeout=config.worker.timeout_minutes * 60,
+        timeout=_remaining(deadline, cap=config.worker.timeout_minutes * 60),
         stdout_path=run_dir / "events.jsonl",
         stderr_path=run_dir / "events.stderr.log",
     )
@@ -155,12 +188,16 @@ def _run_claude(container: str, config: Config, run_dir: Path) -> None:
         logger.info("Claude Code finished")
 
 
-def _ensure_changes(container: str, config: Config) -> None:
-    status = exec_in(container, "cd /work && git status --porcelain", timeout=60)
+def _ensure_changes(container: str, base_sha: str, deadline: float) -> None:
+    status = exec_in(
+        container,
+        "cd /work && git status --porcelain",
+        timeout=_remaining(deadline, cap=60),
+    )
     commits = exec_in(
         container,
-        f"cd /work && git rev-list --count origin/{config.repo.base_branch}..HEAD",
-        timeout=60,
+        f"cd /work && git rev-list --count {base_sha}..HEAD",
+        timeout=_remaining(deadline, cap=60),
     )
     if status.returncode != 0 or commits.returncode != 0:
         raise AgentError("Could not inspect the worker working tree")
@@ -176,39 +213,68 @@ def _ensure_changes(container: str, config: Config) -> None:
     )
 
 
-def _commit_if_needed(container: str, issue: Issue) -> None:
-    status = exec_in(container, "cd /work && git status --porcelain", timeout=60)
-    if status.returncode != 0:
-        raise AgentError("Could not inspect the worker working tree")
-    if not (status.stdout or "").strip():
-        return
-
-    message = f"agent: issue #{issue.number}"
-    _exec_or_raise(
-        container,
-        f'cd /work && git add -A && git commit -m "{message}"',
-        timeout=120,
-        label="commit",
+def _finalize_commit(
+    container: str,
+    base_sha: str,
+    handoff: Handoff,
+    run_dir: Path,
+    deadline: float,
+) -> None:
+    """Replace any worker commits with one deterministic commit."""
+    (run_dir / "commit-message.txt").write_text(handoff.title + "\n", encoding="utf-8")
+    command = (
+        f"cd /work && git reset --soft {base_sha} && "
+        "git add -A && "
+        "git commit -F /out/commit-message.txt && "
+        "git log -1 --pretty=%s"
     )
+    result = _exec_or_raise(
+        container,
+        command,
+        timeout=_remaining(deadline, cap=120),
+        label="finalize commit",
+    )
+    final_subject = (result.stdout or "").strip().splitlines()[-1]
+    if final_subject != handoff.title:
+        raise AgentError("Final commit message does not match the handoff title")
+    logger.info("Finalized standardized commit: {}", handoff.title)
 
 
-def _write_diff(container: str, config: Config, run_dir: Path) -> None:
+def _write_diff(
+    container: str,
+    base_sha: str,
+    run_dir: Path,
+    deadline: float,
+) -> None:
     command = (
         "cd /work && "
-        f"git diff --binary origin/{config.repo.base_branch}...HEAD "
+        f"git diff --binary {base_sha}...HEAD "
         "> /out/diff.patch"
     )
-    result = exec_in(container, command, timeout=120)
+    result = exec_in(
+        container,
+        command,
+        timeout=_remaining(deadline, cap=120),
+    )
     if result.returncode != 0:
         logger.bind(returncode=result.returncode).warning(
             "Could not write diff.patch; continuing"
         )
 
 
-def _run_tests(container: str, config: Config, run_dir: Path) -> str:
+def _run_tests(
+    container: str,
+    config: Config,
+    run_dir: Path,
+    deadline: float,
+) -> str:
     commands = [*config.worker.setup_commands, *config.worker.test_commands]
     command = "cd /work && { " + " && ".join(commands) + "; } > /out/tests.txt 2>&1"
-    result = exec_in(container, command, timeout=900)
+    result = exec_in(
+        container,
+        command,
+        timeout=_remaining(deadline, cap=900),
+    )
     tests_path = run_dir / "tests.txt"
     output = tests_path.read_text(encoding="utf-8", errors="replace") if tests_path.exists() else ""
     if result.returncode != 0:
@@ -220,12 +286,17 @@ def _run_tests(container: str, config: Config, run_dir: Path) -> str:
     return output
 
 
-def _bundle(container: str, branch: str, run_dir: Path) -> Path:
+def _bundle(
+    container: str,
+    branch: str,
+    run_dir: Path,
+    deadline: float,
+) -> Path:
     bundle = run_dir / "result.bundle"
     _exec_or_raise(
         container,
         f"cd /work && git bundle create /out/result.bundle refs/heads/{branch}",
-        timeout=300,
+        timeout=_remaining(deadline, cap=300),
         label="bundle",
     )
     if not bundle.exists() or bundle.stat().st_size == 0:
@@ -233,27 +304,11 @@ def _bundle(container: str, branch: str, run_dir: Path) -> Path:
     return bundle
 
 
-def _read_summary(run_dir: Path, issue: Issue) -> str:
-    summary_path = run_dir / "summary.md"
-    if summary_path.exists():
-        text = summary_path.read_text(encoding="utf-8", errors="replace").strip()
-        if text:
-            return text
-
-    worker_path = run_dir / "worker.json"
-    if worker_path.exists():
-        try:
-            data = json.loads(worker_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as ex:
-            logger.bind(
-                path=str(worker_path), error=ex, error_type=type(ex).__name__
-            ).warning("Could not parse worker.json")
-        else:
-            summary = data.get("summary") if isinstance(data, dict) else None
-            if isinstance(summary, str) and summary.strip():
-                return summary.strip()
-
-    return f"Automated changes for issue #{issue.number}."
+def _remaining(deadline: float, *, cap: int) -> int:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise AgentError("Attempt timed out")
+    return max(1, min(cap, int(remaining)))
 
 
 def _exec_or_raise(
@@ -263,7 +318,7 @@ def _exec_or_raise(
     timeout: int,
     label: str,
     stdout_path: Path | None = None,
-) -> None:
+) -> subprocess.CompletedProcess[str]:
     result = exec_in(
         container,
         command,
@@ -276,3 +331,4 @@ def _exec_or_raise(
             "Worker step failed: {}", details[-2000:]
         )
         raise AgentError(f"{label} failed")
+    return result
