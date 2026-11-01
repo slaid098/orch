@@ -134,11 +134,17 @@ def _parse_config(raw: dict[str, Any], base_dir: Path) -> Config:
     worker = WorkerConfig(
         image=_optional_str(worker_raw, "image", "orch-agent:latest"),
         model=_optional_str(worker_raw, "model", "deepseek-v4.1-flash:cloud"),
-        timeout_minutes=_positive_int(
-            worker_raw.get("timeout_minutes", 90), "worker.timeout_minutes"
+        timeout_minutes=_bounded_int(
+            worker_raw.get("timeout_minutes", 90),
+            "worker.timeout_minutes",
+            minimum=1,
+            maximum=90,
         ),
-        max_attempts=_positive_int(
-            worker_raw.get("max_attempts", 2), "worker.max_attempts"
+        max_attempts=_bounded_int(
+            worker_raw.get("max_attempts", 2),
+            "worker.max_attempts",
+            minimum=1,
+            maximum=3,
         ),
         allowed_tools=_optional_str(
             worker_raw, "allowed_tools", "Read,Write,Edit,Bash,Glob,Grep"

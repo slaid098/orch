@@ -12,33 +12,6 @@ class DockerError(RuntimeError):
     """Raised when a Docker command fails."""
 
 
-def build_image(image: str, dockerfile: Path, context: Path) -> None:
-    """Build the worker image.
-
-    Args:
-        image: Image tag to build.
-        dockerfile: Path to the Dockerfile.
-        context: Docker build context.
-    """
-    if not dockerfile.exists():
-        raise DockerError(f"Dockerfile not found: {dockerfile}")
-
-    logger.info("Building image {} from {}", image, dockerfile)
-    _run(
-        [
-            "docker",
-            "build",
-            "-f",
-            str(dockerfile),
-            "-t",
-            image,
-            str(context),
-        ],
-        timeout=1800,
-    )
-    logger.info("Built image {}", image)
-
-
 def start_worker(
     *,
     image: str,

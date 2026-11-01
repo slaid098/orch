@@ -78,6 +78,38 @@ max_workers: 3
     assert config.max_workers == 3
 
 
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("max_attempts", 4),
+        ("timeout_minutes", 91),
+    ],
+)
+def test_load_config_rejects_worker_limits(
+    tmp_path: Path,
+    key: str,
+    value: int,
+) -> None:
+    repo_path = tmp_path / "repo"
+    (repo_path / ".git").mkdir(parents=True)
+    config_path = _write_config(
+        tmp_path,
+        f"""
+repo:
+  owner: slaid098
+  name: orch
+  path: {repo_path.as_posix()}
+worker:
+  {key}: {value}
+  test_commands:
+    - pytest
+""",
+    )
+
+    with pytest.raises(ConfigError):
+        load_config(config_path)
+
+
 @pytest.mark.parametrize("max_workers", [0, 4])
 def test_load_config_rejects_invalid_worker_count(
     tmp_path: Path,

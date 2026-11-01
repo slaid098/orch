@@ -19,9 +19,6 @@ dev = [
     "ruff>=0.8.0",
 ]
 
-[project.scripts]
-orch = "orch.cli:main"
-
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
@@ -32,13 +29,7 @@ packages = ["src/orch"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src", "."]
-addopts = [
-    "-q",
-    "--strict-markers",
-    "--cov=orch",
-    "--cov-report=term-missing",
-    "--cov-report=xml:coverage.xml",
-]
+addopts = "-q --strict-markers --cov=orch --cov-report=term-missing --cov-report=xml:coverage.xml"
 markers = [
     "unit: fast tests without external services",
     "integration: tests with real local components",
