@@ -168,7 +168,8 @@ def _prepare_workspace(container: str, branch: str, deadline: float) -> str:
         timeout=_remaining(deadline, cap=300),
         label="prepare workspace",
     )
-    base_sha = (result.stdout or "").strip().splitlines()[-1]
+    lines = (result.stdout or "").strip().splitlines()
+    base_sha = lines[-1] if lines else ""
     if not base_sha:
         raise AgentError("Could not resolve the worker base commit")
     log.info("Prepared workspace on branch {} from {}", branch, base_sha[:12])
