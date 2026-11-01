@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import pytest
@@ -44,6 +45,15 @@ def _handoff() -> Handoff:
         watch_out="—",
         pending="—",
     )
+
+
+def test_attempt_budget_covers_source_preparation() -> None:
+    assert pipeline._remaining_attempt_seconds(time.monotonic(), 10) > 0
+    with pytest.raises(TimeoutError):
+        pipeline._remaining_attempt_seconds(
+            time.monotonic() - 11,
+            10,
+        )
 
 
 def test_retry_uses_fresh_source_and_succeeds(
@@ -106,7 +116,7 @@ def test_retry_uses_fresh_source_and_succeeds(
         source_path: Path,
         timeout_seconds: int,
     ) -> WorkerResult:
-        assert timeout_seconds == 1
+        assert 0 < timeout_seconds <= 10
         sources.append(source_path)
         if len(sources) == 1:
             raise RuntimeError("first attempt broke")
@@ -124,7 +134,7 @@ def test_retry_uses_fresh_source_and_succeeds(
         config,
         issue,
         "token",
-        attempt_timeout_seconds=1,
+        attempt_timeout_seconds=10,
     )
 
     assert outcome.status == "pr_open"
@@ -181,11 +191,14 @@ def test_exhausted_attempts_mark_needs_human(
         config,
         issue,
         "token",
-        attempt_timeout_seconds=1,
+        attempt_timeout_seconds=10,
     )
 
     assert outcome.status == "needs_human"
-    assert labels[0] == (("agent:running",), ("agent:queued",))
+    assert labels[0] == (
+        ("agent:running",),
+        ("agent:queued", "agent:needs-human"),
+    )
     assert labels[-1] == (
         ("agent:needs-human",),
         ("agent:running", "agent:queued"),
