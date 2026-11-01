@@ -12,12 +12,11 @@ ENV ANTHROPIC_MODEL=deepseek-v4.1-flash:cloud
 RUN sed -i "s|deb.debian.org|${DEBIAN_MIRROR}|g" /etc/apt/sources.list.d/debian.sources \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
-        bash \
         ca-certificates \
         curl \
         git \
-        nodejs \
-        npm \
+    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 
 RUN npm install -g @anthropic-ai/claude-code \
