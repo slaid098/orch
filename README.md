@@ -24,12 +24,29 @@ The worker has no GitHub token. It cannot push or create pull requests. Only the
 orchestrator process touches GitHub.
 
 If an attempt hangs, crashes, or produces no pull request, the worker container
-is replaced but the `/work` workspace is kept. Before it stops the container,
-orch writes `checkpoint.patch`, `checkpoint.status`, and
-`checkpoint-untracked.tar.gz` into the attempt directory, so tracked and
-untracked work can be recovered even if the workspace is damaged. The next
-attempt continues in the same directory with a fresh context and a short
-handoff. The workspace is deleted only after a pull request is created.
+is replaced but the `/work` workspace is kept. See
+[Retry checkpoints](#retry-checkpoints).
+
+## Retry checkpoints
+
+A failed attempt does not discard `/work`. orch stops the container and starts
+the next attempt in the same workspace with a fresh context and a short handoff
+that names the previous failure. The number of attempts is bounded by
+`worker.max_attempts`.
+
+Before stopping a failed container, orch writes three best-effort files into
+that attempt's directory under
+`data/runs/<owner>__<repo>/issue-N/<run-id>/attempt-K/`:
+
+- `checkpoint.patch` — binary diff of tracked changes against the attempt's
+  base commit.
+- `checkpoint.status` — `git status --porcelain=v1` output.
+- `checkpoint-untracked.tar.gz` — untracked, non-ignored files.
+
+The checkpoint keeps tracked and untracked work recoverable even if the
+workspace is damaged. If writing it fails, orch logs a warning and re-raises
+the original attempt error. The workspace is deleted only after a pull request
+is created; when all attempts fail, the issue is labelled `agent:needs-human`.
 
 ## Requirements
 
