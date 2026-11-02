@@ -9,7 +9,12 @@ from urllib.parse import quote
 
 from orch.config.logger import get_logger
 from orch.exceptions.github import GitHubError
-from orch.schemas.github.types import Comment, Issue
+from orch.schemas.github.types import (
+    CheckResult,
+    Comment,
+    Issue,
+    PullRequestStatus,
+)
 
 log = get_logger(component="github")
 
@@ -291,6 +296,126 @@ def delete_branch(repo: str, branch: str, token: str) -> None:
         )
     else:
         log.info("Deleted stale branch {}", branch)
+
+
+def get_pr_status(repo: str, pr_url: str, token: str) -> PullRequestStatus:
+    """Return the pull-request state and normalized GitHub checks."""
+    number = _pr_number(pr_url)
+    output = _run_gh(
+        [
+            "pr",
+            "view",
+            str(number),
+            "--repo",
+            repo,
+            "--json",
+            "number,url,state,mergeable,mergeStateStatus,headRefOid,statusCheckRollup",
+        ],
+        token,
+    )
+    try:
+        data = json.loads(output)
+    except json.JSONDecodeError as ex:
+        log.bind(error=ex, error_type=type(ex).__name__).error(
+            "Could not parse gh pr view output"
+        )
+        raise GitHubError("Could not parse gh pr view output") from ex
+    else:
+        rollup = data.get("statusCheckRollup") or []
+        checks = tuple(_parse_check(item) for item in rollup if isinstance(item, dict))
+        return PullRequestStatus(
+            number=int(data["number"]),
+            url=str(data.get("url") or pr_url),
+            state=str(data.get("state") or "").upper(),
+            mergeable=str(data.get("mergeable") or "UNKNOWN").upper(),
+            head_sha=str(data.get("headRefOid") or ""),
+            checks=checks,
+        )
+
+
+def merge_pr(
+    repo: str,
+    pr_url: str,
+    token: str,
+) -> str:
+    """Squash-merge a pull request and return its merge commit, if reported."""
+    number = _pr_number(pr_url)
+    _run_gh(
+        [
+            "pr",
+            "merge",
+            str(number),
+            "--repo",
+            repo,
+            "--squash",
+            "--delete-branch",
+        ],
+        token,
+        timeout=300,
+    )
+    log.info("Squash-merged pull request #{}", number)
+    try:
+        output = _run_gh(
+            [
+                "pr",
+                "view",
+                str(number),
+                "--repo",
+                repo,
+                "--json",
+                "mergeCommit",
+                "--jq",
+                ".mergeCommit.oid // empty",
+            ],
+            token,
+        )
+    except GitHubError as ex:
+        log.bind(pr=number, error=str(ex)).warning(
+            "Could not read the merge commit after merging"
+        )
+        return ""
+    return output.strip()
+
+
+def _parse_check(item: dict[str, object]) -> CheckResult:
+    """Normalize a check run or commit status from ``gh pr view``."""
+    context = item.get("context")
+    state = str(item.get("state") or "").upper()
+    if context is not None:
+        name = str(context or "status")
+        if state == "SUCCESS":
+            normalized = "success"
+        elif state in {"PENDING", "EXPECTED"}:
+            normalized = "pending"
+        else:
+            normalized = "failure"
+        return CheckResult(
+            name=name,
+            state=normalized,
+            link=str(item.get("targetUrl") or ""),
+        )
+
+    name = str(item.get("name") or "check")
+    status = str(item.get("status") or "").upper()
+    conclusion = str(item.get("conclusion") or "").upper()
+    if status and status != "COMPLETED":
+        normalized = "pending"
+    elif conclusion in {"SUCCESS", "NEUTRAL", "SKIPPED"}:
+        normalized = "success"
+    else:
+        normalized = "failure"
+    return CheckResult(
+        name=name,
+        state=normalized,
+        link=str(item.get("detailsUrl") or ""),
+    )
+
+
+def _pr_number(pr_url: str) -> int:
+    tail = pr_url.rstrip("/").rsplit("/", 1)[-1]
+    if not tail.isdigit():
+        raise GitHubError(f"Could not determine pull-request number from {pr_url!r}")
+    return int(tail)
 
 
 def create_pr(

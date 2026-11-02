@@ -85,6 +85,71 @@ def _worker_env(model: str, context_tokens: int | None) -> list[str]:
     return args
 
 
+def start_reviewer(
+    *,
+    image: str,
+    name: str,
+    repo_path: Path,
+    run_dir: Path,
+    model: str,
+    context_tokens: int | None = None,
+) -> str:
+    """Start a read-only reviewer container.
+
+    Args:
+        image: Reviewer image tag.
+        name: Container name.
+        repo_path: Worker checkout mounted read-only at ``/review``.
+        run_dir: Host run directory mounted writable at ``/out``.
+        model: Ollama model name passed to Claude Code.
+        context_tokens: Context window in tokens, or ``None`` for auto.
+
+    Returns:
+        The container ID.
+
+    Raises:
+        DockerError: If the image is missing or the container cannot start.
+    """
+    if not _image_exists(image):
+        raise DockerError(
+            f"Reviewer image {image!r} does not exist. Build it with Docker."
+        )
+
+    args = [
+        "docker",
+        "run",
+        "-d",
+        "--name",
+        name,
+        "--label",
+        "orch.managed=true",
+        "--label",
+        "orch.reviewer=true",
+        "-v",
+        f"{repo_path}:/review:ro",
+        "-v",
+        f"{run_dir}:/out",
+        *_worker_env(model, context_tokens),
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges",
+        "--memory",
+        "4g",
+        "--cpus",
+        "2",
+        "--pids-limit",
+        "512",
+        image,
+    ]
+    result = _run(args, timeout=120)
+    container_id = (result.stdout or "").strip()
+    if not container_id:
+        raise DockerError("docker run returned no container id")
+    log.info("Started reviewer container {} ({})", name, container_id[:12])
+    return container_id
+
+
 def start_worker(
     *,
     image: str,
@@ -137,15 +202,17 @@ def exec_in(
     command: str,
     *,
     timeout: int,
+    workdir: str = "/work",
     stdout_path: Path | None = None,
     stderr_path: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    """Execute a command inside a worker container.
+    """Execute a command inside a managed container.
 
     Args:
         name: Container name.
         command: Shell command passed to ``bash -lc``.
         timeout: Timeout in seconds.
+        workdir: Working directory inside the container.
         stdout_path: Optional file receiving stdout.
         stderr_path: Optional file receiving stderr.
 
@@ -158,7 +225,7 @@ def exec_in(
         "-u",
         "agent",
         "-w",
-        "/work",
+        workdir,
         name,
         "bash",
         "-lc",

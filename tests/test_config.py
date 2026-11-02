@@ -41,13 +41,23 @@ data_dir: data
     assert config.labels.needs_human == "agent:needs-human"
     assert config.worker.image == "orch-agent:latest"
     assert config.worker.timeout_minutes == 90
-    assert config.worker.max_attempts == 2
+    assert config.worker.max_attempts == 3
     assert config.worker.autocompact == "200k"
     assert config.worker.test_commands == ("uv run pytest -q",)
     assert config.max_workers == 2
     assert config.retention_days == 7
     assert config.data_dir == (tmp_path / "data").resolve()
     assert config.gh_token == "test-token"
+    assert config.checks.timeout_minutes == 30
+    assert config.checks.poll_seconds == 15
+    assert config.checks.discovery_seconds == 60
+    assert config.reviewer.enabled
+    assert config.reviewer.image is None
+    assert config.reviewer.model is None
+    assert config.reviewer.timeout_minutes == 15
+    assert config.reviewer.max_rounds == 3
+    assert config.reviewer.autocompact == "200k"
+    assert config.reviewer.allowed_tools == "Read,Grep,Glob"
 
 
 def test_load_config_reads_pipeline_controls(tmp_path: Path) -> None:
@@ -632,6 +642,84 @@ worker:
     - pytest
 {section}:
   {body}
+""",
+    )
+
+    with pytest.raises(ConfigError):
+        load_config(config_path)
+
+
+def test_load_config_reads_checks_and_reviewer(tmp_path: Path) -> None:
+    repo_path = tmp_path / "repo"
+    (repo_path / ".git").mkdir(parents=True)
+    config_path = _write_config(
+        tmp_path,
+        f"""
+repo:
+  owner: slaid098
+  name: orch
+  path: {repo_path.as_posix()}
+worker:
+  test_commands:
+    - pytest
+checks:
+  timeout_minutes: 45
+  poll_seconds: 20
+  discovery_seconds: 90
+reviewer:
+  enabled: false
+  image: reviewer:latest
+  model: review-model
+  timeout_minutes: 12
+  max_rounds: 2
+  autocompact: 150k
+  allowed_tools: "Read,Grep"
+""",
+    )
+
+    config = load_config(config_path)
+
+    assert config.checks.timeout_minutes == 45
+    assert config.checks.poll_seconds == 20
+    assert config.checks.discovery_seconds == 90
+    assert not config.reviewer.enabled
+    assert config.reviewer.image == "reviewer:latest"
+    assert config.reviewer.model == "review-model"
+    assert config.reviewer.timeout_minutes == 12
+    assert config.reviewer.max_rounds == 2
+    assert config.reviewer.autocompact == "150k"
+    assert config.reviewer.allowed_tools == "Read,Grep"
+
+
+@pytest.mark.parametrize(
+    "section",
+    [
+        "reviewer:\n  max_rounds: 4",
+        "reviewer:\n  max_rounds: 0",
+        "reviewer:\n  timeout_minutes: 0",
+        "reviewer:\n  autocompact: 99k",
+        "reviewer:\n  image: ''",
+        "checks:\n  poll_seconds: 1",
+        "checks:\n  discovery_seconds: 601",
+    ],
+)
+def test_load_config_rejects_invalid_gate_settings(
+    tmp_path: Path,
+    section: str,
+) -> None:
+    repo_path = tmp_path / "repo"
+    (repo_path / ".git").mkdir(parents=True)
+    config_path = _write_config(
+        tmp_path,
+        f"""
+repo:
+  owner: slaid098
+  name: orch
+  path: {repo_path.as_posix()}
+worker:
+  test_commands:
+    - pytest
+{section}
 """,
     )
 

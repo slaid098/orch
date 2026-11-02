@@ -4,7 +4,9 @@ Minimal GitHub issue to pull request orchestrator for containerized coding agent
 
 `orch` watches GitHub issues labelled `agent:queued`, runs a worker container
 with Claude Code, validates a deterministic commit, runs the repository tests,
-pushes the branch, and opens a pull request. A human reviews and merges it.
+pushes the branch, and opens a pull request. It then waits for GitHub checks,
+runs a separate read-only reviewer container, and squash-merges the pull request
+into `main` only when every check is green and the reviewer returns no findings.
 
 ## What it does
 
@@ -19,11 +21,17 @@ GitHub issue with agent:queued
   -> orch runs the configured tests
   -> orch pushes type/scope/issue-N-description
   -> orch opens a standardized pull request
-  -> a human merges it
+  -> orch waits for GitHub checks
+  -> failed checks return control to the worker, never to the reviewer
+  -> a separate read-only reviewer returns an empty findings array or blocks
+  -> any finding consumes one shared worker attempt and goes back to the worker
+  -> an empty findings array triggers a squash merge into main
+  -> three total worker attempts or three review rounds exhaust to needs-human
 ```
 
-The worker has no GitHub token. It cannot push or create pull requests. Only the
-orchestrator process touches GitHub.
+The worker has no GitHub token. It cannot push or create pull requests. The
+reviewer has no GitHub token and only the `Read`, `Grep`, and `Glob` tools. Only
+the orchestrator process writes, comments, and merges.
 
 ## Live feedback and cancellation
 
@@ -42,6 +50,44 @@ without opening a pull request. The persistent workspace remains under
 `app_data/workspaces/<owner>__<repo>/issue-N` and is removed by retention after
 `retention_days`. Reopening the issue and adding `agent:queued` again resumes
 from the same workspace.
+
+## Reviewer and auto-merge
+
+After the worker opens or updates a pull request, orch force-updates the same
+deterministic branch and polls the checks for the newly pushed commit until they
+finish. A failed check, a merge conflict, or a timeout is reported to the worker
+as the next attempt's previous failure. The reviewer is never started for a red
+pull request or for a stale commit.
+
+The reviewer runs in a separate container with the worker checkout mounted
+read-only at `/review`, no GitHub token, and only `Read`, `Grep`, and `Glob`
+available. It receives the issue, the diff, and the green checks summary. Its
+result is constrained by a JSON schema:
+
+```json
+{"findings": []}
+```
+
+An empty array approves. Any finding blocks the merge; there is no severity
+field and no optional finding. The orchestrator posts every finding to the
+issue and passes the complete list into the next worker attempt.
+
+Worker attempts and reviewer rounds share one budget. `worker.max_attempts`
+defaults to 3 and `reviewer.max_rounds` defaults to 3. A failed worker attempt, a
+failed GitHub check, and a reviewer rejection all consume the next attempt. A
+technical reviewer failure (invalid JSON after one repair launch, timeout, or
+container failure) does not consume a worker attempt: the issue is parked
+immediately in `agent:needs-human`.
+
+A successful review is followed by a squash merge into `main` only. The
+repository base branch must be `main`; orch refuses to auto-merge into any other
+branch. A merge failure is also parked for a human. The persistent workspace is
+kept until a merge succeeds, a human is needed, or the reviewer is disabled.
+
+If a run starts and finds an already-open PR for the same deterministic branch,
+it leaves that PR for a human (`agent:pr-open`) instead of starting another
+worker. This avoids guessing at a workspace or diff that may have been cleaned
+up after the previous run; orch never auto-merges such a PR.
 
 ## Telegram status
 
@@ -76,7 +122,10 @@ orch writes `checkpoint.patch`, `checkpoint.status`, and
 `checkpoint-untracked.tar.gz` into the attempt directory, so tracked and
 untracked work can be recovered even if the workspace is damaged. The next
 attempt continues in the same directory with a fresh context and a short
-handoff. The workspace is deleted only after a pull request is created.
+handoff. The workspace is deleted after a successful merge, or when the reviewer
+is disabled and the PR is left for manual review. When orch parks an issue in
+`agent:needs-human`, the workspace is kept so a human can inspect the failed
+checkout; it can be removed manually after the issue is resolved.
 
 ## Requirements
 
@@ -123,19 +172,23 @@ uv run python main.py --issue N --once
 `--issue` and `--once` must be used together. The command selects the issue
 directly (the `agent:queued` label is not required), claims it
 (`agent:running`), runs the worker, validates and squashes the commit, runs
-`worker.test_commands`, pushes the branch, opens the pull request, and exits.
-It processes exactly one issue and never polls.
+`worker.test_commands`, pushes the branch, opens the pull request, waits for
+GitHub checks, runs the reviewer, and merges when approved. It processes
+exactly one issue and never polls.
 
-- Exit code `0`: the pull request is open. The log prints its URL and the run
-  directory; the issue is labelled `agent:pr-open` and commented.
+- Exit code `0`: the pull request was merged, or it is open for manual review
+  because `reviewer.enabled` is false. The log prints its URL and the run
+  directory; the issue is commented.
 - Exit code `1`: the issue is labelled `agent:needs-human`. Inspect the error,
-  `result.json`, and the worker logs in the printed run directory under
-  `app_data/runs/<owner>__<repo>/issue-N/<run-id>/`.
+  `result.json`, and the worker and reviewer logs in the printed run directory
+  under `app_data/runs/<owner>__<repo>/issue-N/<run-id>/`.
 
 A live run needs Docker, an authenticated `gh`, and the worker image built in
-[Setup](#setup). It makes up to `worker.max_attempts` attempts, each bounded by
+[Setup](#setup). It makes up to `worker.max_attempts` attempts and
+`reviewer.max_rounds` review rounds, each worker attempt bounded by
 `worker.timeout_minutes`, so it can take a long time and consumes model quota.
-Close the smoke-test pull request, branch, and issue when done.
+If the smoke test is merged, the issue is closed automatically; otherwise close
+the pull request, branch, and issue when done.
 
 ## Labels
 
@@ -166,6 +219,9 @@ the model. `orch.yaml` and `app_data/` are ignored by git.
 
 The base branch is fetched into a local bare mirror under `data_dir`; the worker
 never receives a GitHub token and never fetches from GitHub directly.
+`reviewer.image` and `reviewer.model` fall back to the worker image and model
+when omitted. The reviewer timeout should stay in the 10–15 minute range because
+a full repository review can be slow.
 
 Feature flags:
 
@@ -175,6 +231,10 @@ Feature flags:
   one-shot worker.
 - `watchdog.enabled` — Clef-based hang and loop classification; requires an
   Ollama Cloud key.
+- `reviewer.enabled` — run the read-only reviewer and auto-merge approved PRs.
+  Disable it to stop after green checks and leave the PR for a human.
+- `checks.*` — GitHub check polling timeout, interval, and the grace period for
+  checks to appear after a PR is opened.
 
 ### Context window
 
@@ -201,11 +261,18 @@ and after every finished issue; old files are deleted, not archived.
 - The worker writes a git bundle and handoff to `/out`.
 - The orchestrator validates the bundle, creates the commit, pushes the branch,
   and opens the pull request.
+- The reviewer is a separate container with the checkout mounted read-only at
+  `/review`, no GitHub token, and only `Read`, `Grep`, and `Glob`.
+- Reviewer JSON is schema-validated and fail-closed; invalid output never
+  approves or merges. A repair launch is allowed once per review round.
+- Only the orchestrator merges, and only into `main` after green checks and an
+  empty reviewer findings array.
 - Logs stay in the local `app_data` directory and are pruned after
   `retention_days`.
 
 ## Not yet included
 
-- Reviewer agent and automatic review loop
-- Auto-merge by the daemon
 - Multi-repository support
+- Per-project worker quotas
+- Issue dependency edges (`blocked_by`)
+- Hermes triggers or an MCP adapter

@@ -39,7 +39,7 @@ class WorkerConfig:
     image: str = "orch-agent:latest"
     model: str = "deepseek-v4.1-flash:cloud"
     timeout_minutes: int = 90
-    max_attempts: int = 2
+    max_attempts: int = 3
     allowed_tools: str = "Read,Write,Edit,Bash,Glob,Grep"
     autocompact: str = "200k"
     setup_commands: tuple[str, ...] = ()
@@ -85,6 +85,28 @@ class WatchdogConfig:
 
 
 @dataclass(frozen=True)
+class ChecksConfig:
+    """GitHub pull-request check polling settings."""
+
+    timeout_minutes: int = 30
+    poll_seconds: int = 15
+    discovery_seconds: int = 60
+
+
+@dataclass(frozen=True)
+class ReviewerConfig:
+    """Read-only reviewer container settings."""
+
+    enabled: bool = True
+    image: str | None = None
+    model: str | None = None
+    timeout_minutes: int = 15
+    max_rounds: int = 3
+    autocompact: str = "200k"
+    allowed_tools: str = "Read,Grep,Glob"
+
+
+@dataclass(frozen=True)
 class Config:
     """Complete orchestrator configuration."""
 
@@ -99,3 +121,5 @@ class Config:
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
     feedback: FeedbackConfig = field(default_factory=FeedbackConfig)
     watchdog: WatchdogConfig = field(default_factory=WatchdogConfig)
+    checks: ChecksConfig = field(default_factory=ChecksConfig)
+    reviewer: ReviewerConfig = field(default_factory=ReviewerConfig)

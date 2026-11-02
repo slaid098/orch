@@ -34,13 +34,14 @@ def _issue(number: int = 7) -> Issue:
 
 
 def _outcome(status: str = "pr_open") -> RunOutcome:
+    finished = status in {"pr_open", "merged"}
     return RunOutcome(
         run_id="run",
         status=status,
         run_dir=Path("run"),
         branch="feat/cli/issue-7-add-version-flag",
-        pr_url="https://example.test/pr/1" if status == "pr_open" else None,
-        error=None if status == "pr_open" else "failed",
+        pr_url="https://example.test/pr/1" if finished else None,
+        error=None if finished else "failed",
     )
 
 
@@ -117,6 +118,17 @@ def test_run_once_returns_zero_for_open_pr(
     config = _config(tmp_path)
     monkeypatch.setattr(daemon.github, "get_issue", lambda *_args: _issue())
     monkeypatch.setattr(daemon, "run_issue", lambda *_args: _outcome())
+
+    assert daemon.run_once(config, "token", 7) == 0
+
+
+def test_run_once_returns_zero_for_merged_pr(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    monkeypatch.setattr(daemon.github, "get_issue", lambda *_args: _issue())
+    monkeypatch.setattr(daemon, "run_issue", lambda *_args: _outcome("merged"))
 
     assert daemon.run_once(config, "token", 7) == 0
 
@@ -516,3 +528,43 @@ def test_run_once_refuses_closed_issue(
     )
 
     assert daemon.run_once(config, "token", 7) == 1
+
+
+def test_notify_outcome_treats_merged_as_finished(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    merged = RunOutcome(
+        run_id="run",
+        status="merged",
+        run_dir=Path("run"),
+        branch="feat/cli/issue-7-add-version-flag",
+        pr_url="https://example.test/pr/7",
+        issue_title="feat(cli): add version flag",
+        duration_seconds=42,
+    )
+    finished: list[tuple[str, int]] = []
+    monkeypatch.setattr(
+        daemon.notify,
+        "notify_finished",
+        lambda _config, _number, _title, *, pr_url, duration_seconds, queue, active: (
+            finished.append((pr_url, duration_seconds))
+        ),
+    )
+    monkeypatch.setattr(
+        daemon.notify,
+        "notify_needs_human",
+        lambda *_args, **_kwargs: pytest.fail("merged must not need a human"),
+    )
+
+    daemon._notify_outcome(
+        config,
+        7,
+        "feat(cli): add version flag",
+        merged,
+        queue=0,
+        active=0,
+    )
+
+    assert finished == [("https://example.test/pr/7", 42)]

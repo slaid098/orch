@@ -5,7 +5,13 @@ from pathlib import Path
 import pytest
 
 from orch.exceptions.github import GitHubError
-from orch.schemas.config.types import Config, LabelsConfig, RepoConfig, WorkerConfig
+from orch.schemas.config.types import (
+    Config,
+    LabelsConfig,
+    RepoConfig,
+    ReviewerConfig,
+    WorkerConfig,
+)
 from orch.schemas.github.types import Issue
 from orch.schemas.standards.types import Handoff
 from orch.schemas.worker.types import WorkerResult
@@ -23,6 +29,7 @@ def _config(tmp_path: Path, *, max_attempts: int = 2) -> Config:
             test_commands=("pytest",),
         ),
         data_dir=tmp_path / "data",
+        reviewer=ReviewerConfig(enabled=False),
     )
 
 
@@ -209,6 +216,11 @@ def _prepare_pipeline(
         lambda *_args: tmp_path / "mirror.git",
     )
     monkeypatch.setattr(
+        pipeline,
+        "_wait_for_checks",
+        lambda *_args: "CI: success",
+    )
+    monkeypatch.setattr(
         pipeline.gitops,
         "clone_source",
         lambda _mirror, _base, destination: destination,
@@ -301,8 +313,13 @@ def test_publish_branch_imports_and_pushes(
             (str(bare), branch, remote)
         ),
     )
+    monkeypatch.setattr(
+        pipeline.gitops,
+        "branch_sha",
+        lambda _bare, _branch: "abc123",
+    )
 
-    pipeline._publish_branch(_config(tmp_path), worker, "token")
+    assert pipeline._publish_branch(_config(tmp_path), worker, "token") == "abc123"
 
     assert calls == [
         (

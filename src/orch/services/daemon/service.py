@@ -113,8 +113,8 @@ def run_once(config: Config, token: str, issue_number: int) -> int:
         queue=0,
         active=0,
     )
-    if outcome.status == "pr_open":
-        log.info("PR opened: {}", outcome.pr_url)
+    if outcome.status in {"pr_open", "merged"}:
+        log.info("{}: {}", outcome.status, outcome.pr_url)
         log.info("Run directory: {}", outcome.run_dir)
         return 0
 
@@ -261,7 +261,7 @@ def _notify_outcome(
     active: int,
 ) -> None:
     title = issue_title or outcome.issue_title
-    if outcome.status == "pr_open" and outcome.pr_url:
+    if outcome.status in {"pr_open", "merged"} and outcome.pr_url:
         notify.notify_finished(
             config,
             issue_number,
