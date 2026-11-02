@@ -69,6 +69,7 @@ def test_setup_logging_configures_console_and_file(
     assert fake.removed == 1
     assert len(fake.added) == 2
     assert fake.added[1][0] == config.data_dir / "orch.log"
+    assert fake.added[1][1]["retention"] == "7 days"
 
 
 def test_initialize_resolves_token_and_labels(
@@ -259,14 +260,24 @@ def test_run_daemon_skips_active_and_unclaimed_issues(
     assert daemon.run_daemon(config, "token") == 0
 
 
-def test_reap_finished_removes_completed_and_failed_futures() -> None:
+def test_reap_finished_removes_completed_and_failed_futures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     completed = FakeFuture(done=True, result=_outcome())
     failed = FakeFuture(done=True, error=RuntimeError("broken"))
     active = {7: completed, 8: failed, 9: FakeFuture(done=False)}
+    pruned: list[tuple[Path, int]] = []
+    monkeypatch.setattr(
+        daemon,
+        "prune_runs",
+        lambda data_dir, days: pruned.append((data_dir, days)),
+    )
 
-    daemon._reap_finished(active)
+    daemon._reap_finished(active, _config(tmp_path))
 
     assert list(active) == [9]
+    assert pruned == [(tmp_path / "data", 7)]
 
 
 def test_claim_issue_returns_true_on_success(

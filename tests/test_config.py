@@ -42,8 +42,10 @@ data_dir: data
     assert config.worker.image == "orch-agent:latest"
     assert config.worker.timeout_minutes == 90
     assert config.worker.max_attempts == 2
+    assert config.worker.autocompact == "200k"
     assert config.worker.test_commands == ("uv run pytest -q",)
     assert config.max_workers == 2
+    assert config.retention_days == 7
     assert config.data_dir == (tmp_path / "data").resolve()
     assert config.gh_token == "test-token"
 
@@ -64,9 +66,11 @@ labels:
 worker:
   timeout_minutes: 5
   max_attempts: 3
+  autocompact: 150k
   test_commands:
     - pytest
 max_workers: 3
+retention_days: 14
 """,
     )
 
@@ -76,7 +80,9 @@ max_workers: 3
     assert config.labels.needs_human == "custom:needs-human"
     assert config.worker.timeout_minutes == 5
     assert config.worker.max_attempts == 3
+    assert config.worker.autocompact == "150k"
     assert config.max_workers == 3
+    assert config.retention_days == 14
 
 
 @pytest.mark.parametrize(
@@ -290,6 +296,76 @@ repo:
 worker:
   test_commands:
     - pytest
+""",
+    )
+
+    with pytest.raises(ConfigError):
+        load_config(config_path)
+
+
+@pytest.mark.parametrize("value", ["99k", "1001k", "abc", "0", "2000"])
+def test_load_config_rejects_invalid_autocompact(
+    tmp_path: Path,
+    value: str,
+) -> None:
+    repo_path = tmp_path / "repo"
+    (repo_path / ".git").mkdir(parents=True)
+    config_path = _write_config(
+        tmp_path,
+        f"""
+repo:
+  owner: slaid098
+  name: orch
+  path: {repo_path.as_posix()}
+worker:
+  autocompact: {value}
+  test_commands:
+    - pytest
+""",
+    )
+
+    with pytest.raises(ConfigError):
+        load_config(config_path)
+
+
+def test_load_config_accepts_autocompact_auto(tmp_path: Path) -> None:
+    repo_path = tmp_path / "repo"
+    (repo_path / ".git").mkdir(parents=True)
+    config_path = _write_config(
+        tmp_path,
+        f"""
+repo:
+  owner: slaid098
+  name: orch
+  path: {repo_path.as_posix()}
+worker:
+  autocompact: auto
+  test_commands:
+    - pytest
+""",
+    )
+
+    assert load_config(config_path).worker.autocompact == "auto"
+
+
+@pytest.mark.parametrize("value", [0, 366])
+def test_load_config_rejects_invalid_retention(
+    tmp_path: Path,
+    value: int,
+) -> None:
+    repo_path = tmp_path / "repo"
+    (repo_path / ".git").mkdir(parents=True)
+    config_path = _write_config(
+        tmp_path,
+        f"""
+repo:
+  owner: slaid098
+  name: orch
+  path: {repo_path.as_posix()}
+worker:
+  test_commands:
+    - pytest
+retention_days: {value}
 """,
     )
 

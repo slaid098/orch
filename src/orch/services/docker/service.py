@@ -31,6 +31,7 @@ def _worker_run_args(
     workspace_path: Path,
     run_dir: Path,
     model: str,
+    context_tokens: int | None,
 ) -> list[str]:
     return [
         "docker",
@@ -48,26 +49,7 @@ def _worker_run_args(
         f"{workspace_path}:/work",
         "-v",
         f"{run_dir}:/out",
-        "-e",
-        "ANTHROPIC_BASE_URL=http://host.docker.internal:11434",
-        "-e",
-        "ANTHROPIC_AUTH_TOKEN=ollama",
-        "-e",
-        "ANTHROPIC_API_KEY=",
-        "-e",
-        f"ANTHROPIC_MODEL={model}",
-        "-e",
-        f"ANTHROPIC_DEFAULT_HAIKU_MODEL={model}",
-        "-e",
-        f"ANTHROPIC_DEFAULT_SONNET_MODEL={model}",
-        "-e",
-        f"ANTHROPIC_DEFAULT_OPUS_MODEL={model}",
-        "-e",
-        "API_TIMEOUT_MS=600000",
-        "-e",
-        "CLAUDE_CODE_EFFORT_LEVEL=max",
-        "-e",
-        "CLAUDE_CODE_MAX_CONTEXT_TOKENS=200000",
+        *_worker_env(model, context_tokens),
         "--cap-drop",
         "ALL",
         "--security-opt",
@@ -82,6 +64,27 @@ def _worker_run_args(
     ]
 
 
+def _worker_env(model: str, context_tokens: int | None) -> list[str]:
+    values = {
+        "ANTHROPIC_BASE_URL": "http://host.docker.internal:11434",
+        "ANTHROPIC_AUTH_TOKEN": "ollama",
+        "ANTHROPIC_API_KEY": "",
+        "ANTHROPIC_MODEL": model,
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL": model,
+        "ANTHROPIC_DEFAULT_SONNET_MODEL": model,
+        "ANTHROPIC_DEFAULT_OPUS_MODEL": model,
+        "API_TIMEOUT_MS": "600000",
+        "CLAUDE_CODE_EFFORT_LEVEL": "max",
+    }
+    if context_tokens is not None:
+        values["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = str(context_tokens)
+        values["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = str(context_tokens)
+    args: list[str] = []
+    for key, value in values.items():
+        args.extend(["-e", f"{key}={value}"])
+    return args
+
+
 def start_worker(
     *,
     image: str,
@@ -90,6 +93,7 @@ def start_worker(
     workspace_path: Path,
     run_dir: Path,
     model: str,
+    context_tokens: int | None = None,
 ) -> str:
     """Start a detached worker container.
 
@@ -100,6 +104,7 @@ def start_worker(
         workspace_path: Persistent host workspace mounted at ``/work``.
         run_dir: Host run directory mounted at ``/out``.
         model: Ollama model name passed to Claude Code.
+        context_tokens: Context window in tokens, or ``None`` for auto.
 
     Returns:
         The container ID.
@@ -117,6 +122,7 @@ def start_worker(
         workspace_path=workspace_path,
         run_dir=run_dir,
         model=model,
+        context_tokens=context_tokens,
     )
     result = _run(args, timeout=120)
     container_id = (result.stdout or "").strip()

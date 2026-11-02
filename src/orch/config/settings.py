@@ -71,6 +71,9 @@ def _parse_config(
     max_workers = _bounded_int(
         raw.get("max_workers", 2), "max_workers", minimum=1, maximum=3
     )
+    retention_days = _bounded_int(
+        raw.get("retention_days", 7), "retention_days", minimum=1, maximum=365
+    )
     return Config(
         repo=repo,
         labels=labels,
@@ -78,6 +81,7 @@ def _parse_config(
         data_dir=data_dir,
         poll_interval_seconds=poll_interval_seconds,
         max_workers=max_workers,
+        retention_days=retention_days,
         gh_token=_resolve_token(settings),
     )
 
@@ -141,9 +145,24 @@ def _parse_worker(raw: dict[str, Any]) -> WorkerConfig:
         allowed_tools=_optional_str(
             worker_raw, "allowed_tools", "Read,Write,Edit,Bash,Glob,Grep"
         ),
+        autocompact=_parse_autocompact(worker_raw),
         setup_commands=setup_commands,
         test_commands=test_commands,
     )
+
+
+def _parse_autocompact(worker_raw: dict[str, Any]) -> str:
+    value = _optional_str(worker_raw, "autocompact", "200k").lower()
+    if value == "auto":
+        return value
+    suffix = value.endswith("k")
+    digits = value[:-1] if suffix else value
+    if not digits.isdigit():
+        raise ConfigError("worker.autocompact must be 'auto' or tokens like 200k")
+    tokens = int(digits) * (1000 if suffix else 1)
+    if not 100_000 <= tokens <= 1_000_000:
+        raise ConfigError("worker.autocompact must be between 100k and 1M tokens")
+    return f"{tokens // 1000}k" if tokens % 1000 == 0 else str(tokens)
 
 
 def _resolve_token(settings: _RuntimeSettings) -> str | None:

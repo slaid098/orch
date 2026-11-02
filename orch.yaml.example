@@ -16,12 +16,14 @@ worker:
   model: deepseek-v4.1-flash:cloud
   timeout_minutes: 90
   max_attempts: 2
+  autocompact: 200k
   allowed_tools: "Read,Write,Edit,Bash,Glob,Grep"
   setup_commands:
     - uv sync --all-extras
   test_commands:
     - uv run pytest -q
 
-data_dir: D:/orch/data
+data_dir: D:/orch/app_data
+retention_days: 7
 poll_interval_seconds: 30
 max_workers: 2

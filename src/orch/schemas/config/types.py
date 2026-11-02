@@ -41,6 +41,7 @@ class WorkerConfig:
     timeout_minutes: int = 90
     max_attempts: int = 2
     allowed_tools: str = "Read,Write,Edit,Bash,Glob,Grep"
+    autocompact: str = "200k"
     setup_commands: tuple[str, ...] = ()
     test_commands: tuple[str, ...] = ()
 
@@ -55,4 +56,5 @@ class Config:
     data_dir: Path
     poll_interval_seconds: int = 30
     max_workers: int = 2
+    retention_days: int = 7
     gh_token: str | None = None

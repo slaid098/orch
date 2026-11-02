@@ -78,7 +78,7 @@ It processes exactly one issue and never polls.
   directory; the issue is labelled `agent:pr-open` and commented.
 - Exit code `1`: the issue is labelled `agent:needs-human`. Inspect the error,
   `result.json`, and the worker logs in the printed run directory under
-  `data/runs/<owner>__<repo>/issue-N/<run-id>/`.
+  `app_data/runs/<owner>__<repo>/issue-N/<run-id>/`.
 
 A live run needs Docker, an authenticated `gh`, and the worker image built in
 [Setup](#setup). It makes up to `worker.max_attempts` attempts, each bounded by
@@ -110,10 +110,21 @@ external `audit` skill; do not copy them here.
 ## Configuration
 
 Copy `orch.yaml.example` to `orch.yaml` and adjust paths, labels, commands, and
-the model. `orch.yaml` and `data/` are ignored by git.
+the model. `orch.yaml` and `app_data/` are ignored by git.
 
 The base branch is fetched into a local bare mirror under `data_dir`; the worker
 never receives a GitHub token and never fetches from GitHub directly.
+
+### Context window
+
+`worker.autocompact` pins the Claude Code context window. The default `200k`
+writes the same value to the CLI flag, the container environment, and
+`~/.claude/settings.json` inside the worker, so every agent that runs there
+inherits it. `auto` leaves the window to Claude Code.
+
+`retention_days` (default 7) removes old run directories and rotated logs, so
+local artifacts never grow without bound. Rotation happens at daemon startup
+and after every finished issue; old files are deleted, not archived.
 
 ## Security model
 
@@ -124,7 +135,8 @@ never receives a GitHub token and never fetches from GitHub directly.
 - The worker writes a git bundle and handoff to `/out`.
 - The orchestrator validates the bundle, creates the commit, pushes the branch,
   and opens the pull request.
-- Logs stay in the local data directory and are not committed.
+- Logs stay in the local `app_data` directory and are pruned after
+  `retention_days`.
 
 ## Not yet included
 

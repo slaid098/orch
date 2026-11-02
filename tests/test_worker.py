@@ -127,6 +127,9 @@ def test_run_worker_success(
     )
     assert any("uv sync" in command for command in commands)
     assert any("pytest" in command for command in commands)
+    assert any("settings.json" in command for command in commands)
+    assert any("--autocompact 200k" in command for command in commands)
+    assert starts[0]["context_tokens"] == 200_000
 
 
 def test_run_worker_rejects_no_changes_and_stops_container(
@@ -228,6 +231,31 @@ def test_prepare_workspace_requires_base_sha(
 
     with pytest.raises(AgentError, match="base commit"):
         worker._prepare_workspace("container", "branch", time.monotonic() + 30)
+
+
+def test_prepare_workspace_reclones_corrupted_workspace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[str] = []
+
+    def fake_exec(
+        _name: str,
+        command: str,
+        *,
+        timeout: int,
+        stdout_path: Path | None = None,
+        stderr_path: Path | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        del timeout, stdout_path, stderr_path
+        commands.append(command)
+        return _proc("base123\n")
+
+    monkeypatch.setattr(worker, "exec_in", fake_exec)
+
+    worker._prepare_workspace("container", "branch", time.monotonic() + 30)
+
+    assert "rm -rf /work || true" in commands[0]
+    assert "git clone /src /work" in commands[0]
 
 
 def test_run_setup_skips_empty_commands(
