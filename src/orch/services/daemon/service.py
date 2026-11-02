@@ -13,6 +13,7 @@ from orch.schemas.pipeline.types import RunOutcome
 from orch.services import github, store
 from orch.services.docker import cleanup_managed
 from orch.services.pipeline import run_issue
+from orch.services.retention import prune_runs
 
 log = get_logger(component="daemon")
 
@@ -34,7 +35,7 @@ def setup_logging(config: Config) -> None:
         config.data_dir / "orch.log",
         level="DEBUG",
         rotation="10 MB",
-        retention=10,
+        retention=f"{config.retention_days} days",
         encoding="utf-8",
     )
 
@@ -114,6 +115,7 @@ def run_daemon(config: Config, token: str) -> int:
         config.max_workers,
     )
     _reconcile_startup(config, token)
+    prune_runs(config.data_dir, config.retention_days)
     db_path = config.data_dir / "orch.db"
     active: dict[int, Future[RunOutcome]] = {}
 
@@ -123,7 +125,7 @@ def run_daemon(config: Config, token: str) -> int:
     ) as executor:
         try:
             while True:
-                _reap_finished(active)
+                _reap_finished(active, config)
 
                 try:
                     issues = github.list_ready_issues(
@@ -167,7 +169,8 @@ def run_daemon(config: Config, token: str) -> int:
             return 0
 
 
-def _reap_finished(active: dict[int, Future[RunOutcome]]) -> None:
+def _reap_finished(active: dict[int, Future[RunOutcome]], config: Config) -> None:
+    finished = False
     for issue_number, future in list(active.items()):
         if not future.done():
             continue
@@ -186,6 +189,9 @@ def _reap_finished(active: dict[int, Future[RunOutcome]]) -> None:
                 outcome.status,
             )
         del active[issue_number]
+        finished = True
+    if finished:
+        prune_runs(config.data_dir, config.retention_days)
 
 
 def _claim_issue(config: Config, issue: github.Issue, token: str) -> bool:

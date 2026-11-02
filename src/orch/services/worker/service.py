@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import base64
 import subprocess
 import time
 from pathlib import Path
 
+import orch.services.worker.claude as claude
 from orch.config.logger import get_logger
 from orch.exceptions.worker import AgentError
 from orch.schemas.config.types import Config
@@ -118,9 +120,11 @@ def run_worker(
         workspace_path=workspace_path,
         run_dir=run_dir,
         model=config.worker.model,
+        context_tokens=claude.autocompact_tokens(config.worker.autocompact),
     )
 
     try:
+        _write_settings(container, config, deadline)
         base_sha = _prepare_workspace(container, branch, deadline)
         _run_setup(container, config, deadline)
         _run_claude(container, config, run_dir, deadline)
@@ -143,6 +147,27 @@ def run_worker(
         raise
     finally:
         stop(container)
+
+
+def _write_settings(
+    container: str,
+    config: Config,
+    deadline: float,
+) -> None:
+    """Write Claude Code settings that pin the context window."""
+    payload = claude.settings_json(config).encode("utf-8")
+    encoded = base64.b64encode(payload).decode("ascii")
+    command = (
+        "mkdir -p /home/agent/.claude && "
+        f"printf %s {encoded} | base64 -d > /home/agent/.claude/settings.json"
+    )
+    _exec_or_raise(
+        container,
+        command,
+        timeout=_remaining(deadline, cap=60),
+        label="write claude settings",
+    )
+    log.info("Wrote Claude Code settings (autocompact={})", config.worker.autocompact)
 
 
 def _checkpoint(
@@ -192,7 +217,9 @@ def _prepare_workspace(container: str, branch: str, deadline: float) -> str:
         "export GIT_CONFIG_GLOBAL=/out/gitconfig; "
         "git config --global --add safe.directory /src/.git; "
         "git config --global --add safe.directory /work; "
-        "if [ ! -d /work/.git ]; then git clone /src /work; fi; "
+        "if [ ! -d /work/.git ]; then "
+        "rm -rf /work || true; mkdir -p /work; git clone /src /work; "
+        "fi; "
         "cd /work; "
         'git config user.name "orch"; '
         'git config user.email "orch@example.invalid"; '
@@ -235,17 +262,7 @@ def _run_claude(
     run_dir: Path,
     deadline: float,
 ) -> None:
-    command = (
-        "cd /work && "
-        'claude -p "$(cat /out/prompt.md)" '
-        "--output-format stream-json "
-        "--verbose "
-        "--permission-mode bypassPermissions "
-        "--permission-prompts none "
-        f'--allowedTools "{config.worker.allowed_tools}" '
-        "--autocompact 200k "
-        f'--model "{config.worker.model}"'
-    )
+    command = "cd /work && " + claude.build_command(config)
     result = exec_in(
         container,
         command,

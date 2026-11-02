@@ -9,6 +9,8 @@ ENV ANTHROPIC_BASE_URL=http://host.docker.internal:11434
 ENV ANTHROPIC_AUTH_TOKEN=ollama
 ENV ANTHROPIC_API_KEY=
 ENV ANTHROPIC_MODEL=deepseek-v4.1-flash:cloud
+ENV CLAUDE_CODE_MAX_CONTEXT_TOKENS=200000
+ENV CLAUDE_CODE_AUTO_COMPACT_WINDOW=200000
 
 RUN sed -i "s|deb.debian.org|${DEBIAN_MIRROR}|g" /etc/apt/sources.list.d/debian.sources \
     && apt-get update \
@@ -34,6 +36,11 @@ RUN pip install --no-cache-dir uv
 RUN useradd -m -u 1000 agent \
     && mkdir -p /work /out /home/agent \
     && chown -R agent:agent /home/agent /work /out
+
+RUN mkdir -p /home/agent/.claude \
+    && printf '%s\n' '{"autoCompactEnabled":true,"autoCompactWindow":200000,"modelSettings":{"deepseek-v4.1-flash:cloud":{"autoCompactWindow":200000}},"env":{"CLAUDE_CODE_AUTO_COMPACT_WINDOW":"200000","CLAUDE_CODE_MAX_CONTEXT_TOKENS":"200000"}}' \
+        > /home/agent/.claude/settings.json \
+    && chown -R agent:agent /home/agent/.claude
 
 USER agent
 WORKDIR /work

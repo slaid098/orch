@@ -5,6 +5,7 @@ __pycache__/
 .ruff_cache/
 orch.yaml
 data/
+app_data/
 runs/
 *.log
 .env
