@@ -31,6 +31,15 @@ untracked work can be recovered even if the workspace is damaged. The next
 attempt continues in the same directory with a fresh context and a short
 handoff. The workspace is deleted only after a pull request is created.
 
+## Corrupted workspace recovery
+
+If the persistent `/work` workspace is damaged — for example, its `.git`
+directory is missing — orch recovers without manual intervention: it clears
+the workspace directory and clones the repository from `/src` again before the
+attempt starts. The run then continues from a clean checkout of the current
+base revision. Uncommitted changes from the damaged workspace are lost; the
+previous attempt's checkpoint files remain the fallback for recovering them.
+
 ## Requirements
 
 - Python 3.14

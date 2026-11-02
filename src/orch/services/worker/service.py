@@ -192,7 +192,10 @@ def _prepare_workspace(container: str, branch: str, deadline: float) -> str:
         "export GIT_CONFIG_GLOBAL=/out/gitconfig; "
         "git config --global --add safe.directory /src/.git; "
         "git config --global --add safe.directory /work; "
-        "if [ ! -d /work/.git ]; then git clone /src /work; fi; "
+        "if [ ! -d /work/.git ]; then "
+        "find /work -mindepth 1 -maxdepth 1 -exec rm -rf {} +; "
+        "git clone /src /work; "
+        "fi; "
         "cd /work; "
         'git config user.name "orch"; '
         'git config user.email "orch@example.invalid"; '

@@ -230,6 +230,33 @@ def test_prepare_workspace_requires_base_sha(
         worker._prepare_workspace("container", "branch", time.monotonic() + 30)
 
 
+def test_prepare_workspace_reclones_damaged_workspace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[str] = []
+
+    def fake_exec(
+        _name: str,
+        command: str,
+        *,
+        timeout: int,
+        stdout_path: Path | None = None,
+        stderr_path: Path | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        del timeout, stdout_path, stderr_path
+        commands.append(command)
+        return _proc("base123\n")
+
+    monkeypatch.setattr(worker, "exec_in", fake_exec)
+
+    worker._prepare_workspace("container", "branch", time.monotonic() + 30)
+
+    assert len(commands) == 1
+    assert "! -d /work/.git" in commands[0]
+    assert "find /work -mindepth 1 -maxdepth 1 -exec rm -rf {} +" in commands[0]
+    assert "git clone /src /work" in commands[0]
+
+
 def test_run_setup_skips_empty_commands(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
