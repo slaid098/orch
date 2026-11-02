@@ -85,6 +85,19 @@ A live run needs Docker, an authenticated `gh`, and the worker image built in
 `worker.timeout_minutes`, so it can take a long time and consumes model quota.
 Close the smoke-test pull request, branch, and issue when done.
 
+## Live feedback and cancellation
+
+While a worker is running, an authorized participant can comment on the issue.
+orch injects the comment into the current worker session, so the agent can take
+the feedback into account before it finishes and the pull request is created.
+Comments are accepted only from authorized participants; comments from anyone
+else are ignored. Closing the issue cancels the run.
+
+```text
+LIVE-FEEDBACK-OK
+SECOND-LIVE-COMMENT
+```
+
 ## Labels
 
 - `agent:queued` — trigger for the daemon.
