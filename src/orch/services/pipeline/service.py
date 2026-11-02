@@ -8,28 +8,56 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from orch.config.logger import get_logger
-from orch.exceptions.github import GitHubError
+from orch.exceptions.pipeline import ReviewRejected
+from orch.exceptions.reviewer import ReviewerError
 from orch.exceptions.standards import StandardsError
-from orch.exceptions.worker import RunCancelled, WatchdogStop
 from orch.schemas.config.types import Config
 from orch.schemas.github.types import Issue
-from orch.schemas.pipeline.types import RunOutcome
+from orch.schemas.pipeline.types import AttemptCycle, AttemptSuccess, RunOutcome
+from orch.schemas.reviewer.types import ReviewFinding
 from orch.schemas.worker.types import WorkerResult
 from orch.services import git as gitops
 from orch.services import github, store
 from orch.services.feedback.service import CommentFeed
+from orch.services.pipeline.failures import (
+    _comment_attempt_failure as _comment_attempt_failure,
+)
+from orch.services.pipeline.failures import (
+    _retry_outcome,
+)
+from orch.services.pipeline.gate import (
+    _cancel_if_needed,
+    _comment_review_findings,
+    _ensure_issue_open,
+    _finish_pr_open,
+    _format_findings,
+    _merge_and_finish,
+    _review_attempt,
+    _wait_for_checks,
+)
 from orch.services.pipeline.lifecycle import (
     _STATUS_NEEDS_HUMAN,
     _STATUS_PR_OPEN,
-    _cancel_run,
+    _best_effort_comment,
+    _best_effort_labels,
     _park,
     _park_after_retries,
     _park_invalid_title,
+    _workspace_path,
     _write_result,
+)
+from orch.services.pipeline.publish import (
+    _delete_stale_branch as _delete_stale_branch,
+)
+from orch.services.pipeline.publish import (
+    _find_open_pr,
+    _publish_success,
+)
+from orch.services.pipeline.publish import (
+    _publish_branch as _publish_branch,
 )
 from orch.services.standards import (
     branch_name,
-    format_pr_body,
     validate_branch,
     validate_title,
 )
@@ -223,21 +251,6 @@ def _remaining_attempt_seconds(started: float, budget_seconds: int) -> int:
     return max(1, int(remaining))
 
 
-def _workspace_path(config: Config, issue: Issue) -> Path:
-    repo = f"{config.repo.owner}__{config.repo.name}"
-    return config.data_dir / "workspaces" / repo / f"issue-{issue.number}"
-
-
-def _find_open_pr(repo: str, branch: str, token: str) -> str | None:
-    try:
-        return github.find_open_pr(repo, branch, token)
-    except GitHubError as ex:
-        log.bind(branch=branch, error=str(ex)).warning(
-            "Could not check for an existing pull request"
-        )
-        return None
-
-
 def _finish_existing_pr(
     config: Config,
     issue: Issue,
@@ -288,99 +301,6 @@ def _finish_existing_pr(
         run_dir=run_dir,
         branch=branch,
         pr_url=pr_url,
-    )
-
-
-def _comment_attempt_failure(
-    config: Config,
-    issue: Issue,
-    token: str,
-    attempt: int,
-    error: Exception,
-) -> None:
-    message = (
-        f"Попытка {attempt}/{config.worker.max_attempts} не удалась.\n\n"
-        f"`{type(error).__name__}: {str(error)[:1000]}`\n\n"
-        "Запускаю следующую попытку в том же workspace с новым контекстом."
-    )
-    try:
-        github.comment_issue(
-            config.repo.full_name,
-            issue.number,
-            token,
-            github.mark_bot_body(message),
-        )
-    except Exception as notify_error:
-        log.bind(
-            issue=issue.number,
-            error=notify_error,
-            error_type=type(notify_error).__name__,
-        ).warning("Could not post attempt failure comment")
-
-
-def _best_effort_comment(
-    repo: str,
-    issue_number: int,
-    token: str,
-    body: str,
-) -> None:
-    try:
-        github.comment_issue(repo, issue_number, token, github.mark_bot_body(body))
-    except Exception as ex:
-        log.bind(
-            issue=issue_number,
-            error=ex,
-            error_type=type(ex).__name__,
-        ).warning("Could not post issue comment")
-
-
-def _best_effort_labels(
-    repo: str,
-    issue_number: int,
-    token: str,
-    *,
-    add: tuple[str, ...],
-    remove: tuple[str, ...],
-) -> None:
-    try:
-        github.edit_labels(
-            repo,
-            issue_number,
-            token,
-            add=add,
-            remove=remove,
-        )
-    except Exception as ex:
-        log.bind(
-            issue=issue_number,
-            error=ex,
-            error_type=type(ex).__name__,
-        ).warning("Could not update issue labels")
-
-
-def _delete_stale_branch(config: Config, branch: str, token: str) -> None:
-    existing = _find_open_pr(config.repo.full_name, branch, token)
-    if existing:
-        return
-    github.delete_branch(config.repo.full_name, branch, token)
-
-
-def _publish_branch(config: Config, worker: WorkerResult, token: str) -> None:
-    bare = gitops.import_bundle(worker.bundle_path, worker.branch, worker.run_dir)
-    remote = gitops.authenticated_remote(config.repo.owner, config.repo.name, token)
-    gitops.push_branch(bare, worker.branch, remote, token)
-
-
-def _success_comment(
-    worker: WorkerResult,
-    pr_url: str,
-    run_id: str,
-    attempt: int,
-) -> str:
-    return (
-        f"orch открыл PR: {pr_url}\n\n"
-        f"Попытка: `{attempt}`. Тесты прошли. Run: `{run_id}`\n\n"
-        f"{worker.handoff.what[:3000]}\n"
     )
 
 
@@ -458,53 +378,98 @@ def _retry_until_success(
     initial_context: str,
 ) -> RunOutcome:
     last_error: Exception | None = None
+    last_pr_url: str | None = None
+    review_rounds = 0
     for attempt in range(1, config.worker.max_attempts + 1):
-        try:
-            return _run_attempt(
-                config,
-                issue,
-                token,
-                run_id=run_id,
-                run_dir=run_dir,
-                branch=branch,
-                title=title,
-                timeout_seconds=timeout_seconds,
-                source=source,
-                workspace=workspace,
-                feed=feed,
-                initial_context=initial_context,
-                attempt=attempt,
-                previous_error=last_error,
-            )
-        except Exception as ex:
-            outcome = _retry_outcome(
-                config,
-                issue,
-                token,
-                ex,
-                run_id=run_id,
-                run_dir=run_dir,
-                branch=branch,
-                attempt=attempt,
-            )
-            if outcome is not None:
-                return outcome
-            last_error = ex
-
+        cycle = _run_attempt_cycle(
+            config,
+            issue,
+            token,
+            run_id=run_id,
+            run_dir=run_dir,
+            branch=branch,
+            title=title,
+            timeout_seconds=timeout_seconds,
+            source=source,
+            workspace=workspace,
+            feed=feed,
+            initial_context=initial_context,
+            attempt=attempt,
+            previous_error=last_error,
+            review_rounds=review_rounds,
+            last_pr_url=last_pr_url,
+        )
+        if cycle.outcome is not None:
+            return cycle.outcome
+        last_error = cycle.error
+        review_rounds = cycle.review_rounds
+        last_pr_url = cycle.pr_url or last_pr_url
     error = last_error or RuntimeError("No attempt produced a pull request")
     return _park_after_retries(
         config,
         issue,
         token,
-        run_dir=run_dir,
-        run_id=run_id,
-        branch=branch,
+        run_dir=run_dir, run_id=run_id, branch=branch,
         error=error,
         attempts=config.worker.max_attempts,
+        pr_url=last_pr_url,
+        review_rounds=review_rounds,
     )
 
 
-def _retry_outcome(
+def _run_attempt_cycle(
+    config: Config,
+    issue: Issue,
+    token: str,
+    *,
+    run_id: str,
+    run_dir: Path,
+    branch: str,
+    title: str,
+    timeout_seconds: int,
+    source: Path,
+    workspace: Path,
+    feed: CommentFeed | None,
+    initial_context: str,
+    attempt: int,
+    previous_error: Exception | None,
+    review_rounds: int,
+    last_pr_url: str | None,
+) -> AttemptCycle:
+    try:
+        attempt_result = _run_attempt(
+            config,
+            issue,
+            token,
+            run_id=run_id, run_dir=run_dir, branch=branch, title=title,
+            timeout_seconds=timeout_seconds, source=source, workspace=workspace,
+            feed=feed, initial_context=initial_context, attempt=attempt,
+            previous_error=previous_error,
+        )
+    except Exception as ex:
+        return _worker_failure_cycle(
+            config,
+            issue,
+            token,
+            ex,
+            run_id=run_id, run_dir=run_dir, branch=branch,
+            attempt=attempt, review_rounds=review_rounds,
+            last_pr_url=last_pr_url,
+        )
+    if isinstance(attempt_result, RunOutcome):
+        return AttemptCycle(attempt_result, None, review_rounds, last_pr_url)
+    return _gate_cycle(
+        config,
+        issue,
+        token,
+        attempt_result,
+        run_id=run_id, run_dir=run_dir, branch=branch,
+        attempt=attempt, review_rounds=review_rounds,
+        feed=feed, workspace=workspace,
+    )
+
+
+def _worker_failure_cycle(
     config: Config,
     issue: Issue,
     token: str,
@@ -514,39 +479,314 @@ def _retry_outcome(
     run_dir: Path,
     branch: str,
     attempt: int,
-) -> RunOutcome | None:
-    if isinstance(error, RunCancelled):
-        return _cancel_run(
+    review_rounds: int,
+    last_pr_url: str | None,
+) -> AttemptCycle:
+    outcome = _retry_outcome(
+        config,
+        issue,
+        token,
+        error,
+        run_id=run_id,
+        run_dir=run_dir,
+        branch=branch,
+        attempt=attempt,
+    )
+    return AttemptCycle(outcome, error, review_rounds, last_pr_url)
+
+
+def _gate_cycle(
+    config: Config,
+    issue: Issue,
+    token: str,
+    attempt_result: AttemptSuccess,
+    *,
+    run_id: str,
+    run_dir: Path,
+    branch: str,
+    attempt: int,
+    review_rounds: int,
+    feed: CommentFeed | None,
+    workspace: Path,
+) -> AttemptCycle:
+    checks_summary, error, outcome = _checks_cycle(
+        config,
+        issue,
+        token,
+        attempt_result,
+        feed,
+        run_id=run_id,
+        run_dir=run_dir,
+        branch=branch,
+        attempt=attempt,
+    )
+    if outcome is not None or error is not None:
+        return AttemptCycle(outcome, error, review_rounds, attempt_result.pr_url)
+    if not config.reviewer.enabled:
+        return AttemptCycle(
+            _finish_pr_open(
+                config,
+                issue,
+                attempt_result,
+                run_dir=run_dir,
+                run_id=run_id,
+                workspace=workspace,
+                attempt=attempt,
+                checks_summary=checks_summary,
+            ),
+            None,
+            review_rounds,
+            attempt_result.pr_url,
+        )
+    return _review_cycle(
+        config,
+        issue,
+        token,
+        attempt_result,
+        run_dir=run_dir, run_id=run_id, branch=branch,
+        attempt=attempt,
+        review_rounds=review_rounds,
+        checks_summary=checks_summary,
+        workspace=workspace,
+    )
+
+
+def _checks_cycle(
+    config: Config,
+    issue: Issue,
+    token: str,
+    attempt_result: AttemptSuccess,
+    feed: CommentFeed | None,
+    *,
+    run_id: str,
+    run_dir: Path,
+    branch: str,
+    attempt: int,
+) -> tuple[str | None, Exception | None, RunOutcome | None]:
+    try:
+        checks = (
+            _wait_for_checks(
+                config,
+                issue,
+                token,
+                attempt_result.pr_url,
+                feed,
+                expected_head=attempt_result.head_sha,
+            )
+            if attempt_result.head_sha
+            else _wait_for_checks(
+                config,
+                issue,
+                token,
+                attempt_result.pr_url,
+                feed,
+            )
+        )
+        return checks, None, None
+    except Exception as ex:
+        outcome = _retry_outcome(
             config,
             issue,
-            run_dir,
-            run_id,
-            branch,
-            str(error) or "issue closed",
-            attempts=attempt,
+            token,
+            ex,
+            run_id=run_id,
+            run_dir=run_dir,
+            branch=branch,
+            attempt=attempt,
         )
-    if isinstance(error, WatchdogStop):
-        return _park_after_retries(
+        return None, ex, outcome
+
+
+def _review_cycle(
+    config: Config,
+    issue: Issue,
+    token: str,
+    attempt_result: AttemptSuccess,
+    *,
+    run_dir: Path,
+    run_id: str,
+    branch: str,
+    attempt: int,
+    review_rounds: int,
+    checks_summary: str,
+    workspace: Path,
+) -> AttemptCycle:
+    review_round = review_rounds + 1
+    try:
+        review = _review_attempt(
+            config,
+            issue,
+            attempt_result,
+            workspace=workspace, run_dir=run_dir,
+            checks_summary=checks_summary, review_round=review_round,
+        )
+    except Exception as ex:
+        return _review_failure_cycle(
+            config,
+            issue,
+            token,
+            attempt_result,
+            ex,
+            run_dir=run_dir, run_id=run_id, branch=branch,
+            attempt=attempt, review_round=review_round,
+        )
+    if review.approved:
+        return _approved_review_cycle(
+            config,
+            issue,
+            token,
+            attempt_result,
+            run_dir=run_dir, run_id=run_id, workspace=workspace,
+            attempt=attempt, review_round=review_round,
+            checks_summary=checks_summary,
+        )
+    return _rejected_review_cycle(
+        config,
+        issue,
+        token,
+        attempt_result,
+        review.findings,
+        run_dir=run_dir, run_id=run_id, branch=branch,
+        attempt=attempt, review_round=review_round,
+    )
+
+
+def _review_failure_cycle(
+    config: Config,
+    issue: Issue,
+    token: str,
+    attempt_result: AttemptSuccess,
+    error: Exception,
+    *,
+    run_dir: Path,
+    run_id: str,
+    branch: str,
+    attempt: int,
+    review_round: int,
+) -> AttemptCycle:
+    reviewer_error = _reviewer_error(error)
+    outcome = _park_reviewer_failure(
+        config,
+        issue,
+        token,
+        attempt_result,
+        reviewer_error,
+        run_dir=run_dir, run_id=run_id, branch=branch,
+        attempt=attempt,
+        review_round=review_round,
+    )
+    return AttemptCycle(
+        outcome,
+        reviewer_error,
+        review_round,
+        attempt_result.pr_url,
+    )
+
+
+def _approved_review_cycle(
+    config: Config,
+    issue: Issue,
+    token: str,
+    attempt_result: AttemptSuccess,
+    *,
+    run_dir: Path,
+    run_id: str,
+    workspace: Path,
+    attempt: int,
+    review_round: int,
+    checks_summary: str,
+) -> AttemptCycle:
+    outcome = _merge_and_finish(
+        config,
+        issue,
+        token,
+        attempt_result,
+        run_dir=run_dir,
+        run_id=run_id,
+        workspace=workspace,
+        attempt=attempt,
+        review_rounds=review_round,
+        checks_summary=checks_summary,
+    )
+    return AttemptCycle(outcome, None, review_round, attempt_result.pr_url)
+
+
+def _rejected_review_cycle(
+    config: Config,
+    issue: Issue,
+    token: str,
+    attempt_result: AttemptSuccess,
+    findings: tuple[ReviewFinding, ...],
+    *,
+    run_dir: Path,
+    run_id: str,
+    branch: str,
+    attempt: int,
+    review_round: int,
+) -> AttemptCycle:
+    review_error = ReviewRejected(_format_findings(findings))
+    _comment_review_findings(config, issue, token, findings)
+    if (
+        review_round >= config.reviewer.max_rounds
+        or attempt >= config.worker.max_attempts
+    ):
+        outcome = _park_after_retries(
             config,
             issue,
             token,
             run_dir=run_dir,
             run_id=run_id,
             branch=branch,
-            error=error,
+            error=review_error,
             attempts=attempt,
+            pr_url=attempt_result.pr_url,
+            review_rounds=review_round,
         )
-    _handle_attempt_failure(
+        return AttemptCycle(
+            outcome,
+            review_error,
+            review_round,
+            attempt_result.pr_url,
+        )
+    return AttemptCycle(None, review_error, review_round, attempt_result.pr_url)
+
+
+def _reviewer_error(error: Exception) -> ReviewerError:
+    if isinstance(error, ReviewerError):
+        return error
+    return ReviewerError(f"reviewer crashed: {error}")
+
+
+def _park_reviewer_failure(
+    config: Config,
+    issue: Issue,
+    token: str,
+    attempt_result: AttemptSuccess,
+    error: ReviewerError,
+    *,
+    run_dir: Path,
+    run_id: str,
+    branch: str,
+    attempt: int,
+    review_round: int,
+) -> RunOutcome:
+    log.bind(
+        issue=issue.number,
+        pr_url=attempt_result.pr_url,
+        review_round=review_round,
+        error=error,
+        error_type=type(error).__name__,
+    ).error("Reviewer failed technically; parking")
+    return _park_after_retries(
         config,
         issue,
         token,
-        run_id=run_id,
-        attempt=attempt,
-        branch=branch,
+        run_dir=run_dir, run_id=run_id, branch=branch,
         error=error,
+        attempts=attempt,
+        pr_url=attempt_result.pr_url,
+        review_rounds=review_round,
     )
-    return None
-
 
 def _run_attempt(
     config: Config,
@@ -564,15 +804,13 @@ def _run_attempt(
     initial_context: str,
     attempt: int,
     previous_error: Exception | None,
-) -> RunOutcome:
-    cancelled = _cancel_if_needed(
+) -> AttemptSuccess | RunOutcome:
+    cancelled = _attempt_cancelled(
         config,
         issue,
         token,
         feed,
-        run_dir=run_dir,
-        run_id=run_id,
-        branch=branch,
+        run_dir=run_dir, run_id=run_id, branch=branch,
         attempts=attempt - 1,
     )
     if cancelled is not None:
@@ -589,58 +827,51 @@ def _run_attempt(
         feedback=feed,
         initial_context=initial_context if attempt == 1 else "",
     )
-    return _finish_or_cancel(
-        config,
-        issue,
-        token,
-        worker,
-        feed,
-        run_dir=run_dir,
-        run_id=run_id,
-        branch=branch,
-        attempt=attempt,
-        title=title,
-    )
-
-
-def _finish_or_cancel(
-    config: Config,
-    issue: Issue,
-    token: str,
-    worker: WorkerResult,
-    feed: CommentFeed | None,
-    *,
-    run_dir: Path,
-    run_id: str,
-    branch: str,
-    attempt: int,
-    title: str,
-) -> RunOutcome:
-    cancelled = _cancel_if_needed(
+    cancelled = _attempt_cancelled(
         config,
         issue,
         token,
         feed,
-        run_dir=run_dir,
-        run_id=run_id,
-        branch=branch,
+        run_dir=run_dir, run_id=run_id, branch=branch,
         attempts=attempt,
     )
     if cancelled is not None:
         return cancelled
-    return _finish_success(
+    return _publish_attempt(
         config,
         issue,
         token,
         worker,
-        run_dir=run_dir,
         run_id=run_id,
         attempt=attempt,
         title=title,
     )
 
 
-def _cancel_if_needed(
+def _publish_attempt(
+    config: Config,
+    issue: Issue,
+    token: str,
+    worker: WorkerResult,
+    *,
+    run_id: str,
+    attempt: int,
+    title: str,
+) -> AttemptSuccess:
+    _ensure_issue_open(config, issue, token)
+    pr_url, head_sha = _publish_success(
+        config,
+        issue,
+        token,
+        worker,
+        run_id=run_id,
+        attempt=attempt,
+        title=title,
+    )
+    return AttemptSuccess(worker=worker, pr_url=pr_url, head_sha=head_sha)
+
+
+def _attempt_cancelled(
     config: Config,
     issue: Issue,
     token: str,
@@ -651,39 +882,14 @@ def _cancel_if_needed(
     branch: str,
     attempts: int,
 ) -> RunOutcome | None:
-    reason = _cancellation_reason(config, issue, token, feed)
-    if reason is None:
-        return None
-    return _cancel_run(
+    return _cancel_if_needed(
         config,
         issue,
-        run_dir,
-        run_id,
-        branch,
-        reason,
+        token,
+        feed,
+        run_dir=run_dir, run_id=run_id, branch=branch,
         attempts=attempts,
     )
-
-
-def _cancellation_reason(
-    config: Config,
-    issue: Issue,
-    token: str,
-    feed: CommentFeed | None,
-) -> str | None:
-    if feed is not None and feed.cancelled:
-        return feed.cancel_reason or "issue closed"
-    try:
-        is_open = github.issue_is_open(config.repo.full_name, issue.number, token)
-    except GitHubError as ex:
-        log.bind(
-            issue=issue.number,
-            error=ex,
-            error_type=type(ex).__name__,
-        ).warning("Could not verify that the issue is still open; continuing")
-        return None
-    else:
-        return None if is_open else "issue closed"
 
 
 def _run_worker_attempt(
@@ -730,130 +936,6 @@ def _run_worker_attempt(
             f"Worker returned branch {worker.branch!r}, expected {expected_branch!r}"
         )
     return worker
-
-
-def _finish_success(
-    config: Config,
-    issue: Issue,
-    token: str,
-    worker: WorkerResult,
-    *,
-    run_dir: Path,
-    run_id: str,
-    attempt: int,
-    title: str,
-) -> RunOutcome:
-    _ensure_issue_open(config, issue, token)
-    pr_url = _publish_success(
-        config,
-        issue,
-        token,
-        worker,
-        run_id=run_id,
-        attempt=attempt,
-        title=title,
-    )
-    _write_result(
-        run_dir,
-        {
-            "run_id": run_id,
-            "status": _STATUS_PR_OPEN,
-            "branch": worker.branch,
-            "pr_url": pr_url,
-            "tests_passed": True,
-            "attempts": attempt,
-        },
-    )
-    store.finish_run(
-        config.data_dir / "orch.db",
-        run_id=run_id,
-        status=_STATUS_PR_OPEN,
-        pr_url=pr_url,
-    )
-    gitops.cleanup_workspace(_workspace_path(config, issue))
-    log.info("Issue #{} is ready for review: {}", issue.number, pr_url)
-    return RunOutcome(
-        run_id=run_id,
-        status=_STATUS_PR_OPEN,
-        run_dir=run_dir,
-        branch=worker.branch,
-        pr_url=pr_url,
-    )
-
-
-def _ensure_issue_open(config: Config, issue: Issue, token: str) -> None:
-    try:
-        is_open = github.issue_is_open(
-            config.repo.full_name,
-            issue.number,
-            token,
-        )
-    except GitHubError as ex:
-        log.bind(
-            issue=issue.number,
-            error=ex,
-            error_type=type(ex).__name__,
-        ).warning("Could not verify the issue before opening a PR; continuing")
-    else:
-        if not is_open:
-            raise RunCancelled("issue closed before pull request creation")
-
-
-def _publish_success(
-    config: Config,
-    issue: Issue,
-    token: str,
-    worker: WorkerResult,
-    *,
-    run_id: str,
-    attempt: int,
-    title: str,
-) -> str:
-    repo = config.repo.full_name
-    _publish_branch(config, worker, token)
-    pr_url = github.create_pr(
-        repo,
-        token,
-        head=worker.branch,
-        base=config.repo.base_branch,
-        title=title,
-        body=format_pr_body(worker.handoff, issue.number),
-    )
-    _best_effort_comment(
-        repo,
-        issue.number,
-        token,
-        _success_comment(worker, pr_url, run_id, attempt),
-    )
-    _best_effort_labels(
-        repo,
-        issue.number,
-        token,
-        add=(config.labels.pr_open,),
-        remove=(config.labels.running, config.labels.needs_human),
-    )
-    return pr_url
-
-
-def _handle_attempt_failure(
-    config: Config,
-    issue: Issue,
-    token: str,
-    *,
-    run_id: str,
-    attempt: int,
-    branch: str,
-    error: Exception,
-) -> None:
-    log.bind(
-        issue=issue.number,
-        run_id=run_id,
-        attempt=attempt,
-        error=error,
-        error_type=type(error).__name__,
-    ).error("Issue attempt failed")
-    _comment_attempt_failure(config, issue, token, attempt, error)
-    _delete_stale_branch(config, branch, token)
 
 
 def _new_run_id(issue: int) -> str:

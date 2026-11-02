@@ -175,6 +175,7 @@ def push_branch(bare: Path, branch: str, remote_url: str, token: str) -> None:
                 "--git-dir",
                 str(bare),
                 "push",
+                "--force",
                 remote_url,
                 f"refs/heads/{branch}:refs/heads/{branch}",
             ],
@@ -186,6 +187,14 @@ def push_branch(bare: Path, branch: str, remote_url: str, token: str) -> None:
         raise GitError(f"Could not push branch {branch}") from ex
     else:
         log.info("Pushed branch {} to GitHub", branch)
+
+
+def branch_sha(bare: Path, branch: str) -> str:
+    """Return the commit SHA of a branch in a local bare repository."""
+    return _run_git(
+        ["--git-dir", str(bare), "rev-parse", f"refs/heads/{branch}"],
+        cwd=bare.parent,
+    ).strip()
 
 
 def authenticated_remote(owner: str, name: str, token: str) -> str:

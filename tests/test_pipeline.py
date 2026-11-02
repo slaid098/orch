@@ -9,11 +9,18 @@ import pytest
 
 from orch.exceptions.github import GitHubError
 from orch.exceptions.worker import RunCancelled, WatchdogStop
-from orch.schemas.config.types import Config, LabelsConfig, RepoConfig, WorkerConfig
+from orch.schemas.config.types import (
+    Config,
+    LabelsConfig,
+    RepoConfig,
+    ReviewerConfig,
+    WorkerConfig,
+)
 from orch.schemas.github.types import Issue
 from orch.schemas.standards.types import Handoff
 from orch.schemas.worker.types import WorkerResult
 from orch.services import store
+from orch.services.pipeline import publish
 from orch.services.pipeline import service as pipeline
 
 
@@ -28,6 +35,7 @@ def _config(tmp_path: Path) -> Config:
         ),
         data_dir=tmp_path / "data",
         max_workers=2,
+        reviewer=ReviewerConfig(enabled=False),
     )
 
 
@@ -83,6 +91,11 @@ def test_retry_reuses_source_and_workspace_and_succeeds(
     prs: list[dict[str, object]] = []
 
     monkeypatch.setattr(pipeline.gitops, "refresh_mirror", lambda *args: tmp_path / "mirror.git")
+    monkeypatch.setattr(
+        pipeline,
+        "_wait_for_checks",
+        lambda *_args: "CI: success",
+    )
 
     def clone_source(_mirror: Path, _base: str, destination: Path) -> Path:
         destination.mkdir(parents=True)
@@ -94,7 +107,7 @@ def test_retry_reuses_source_and_workspace_and_succeeds(
         "cleanup_source",
         lambda source: cleaned_sources.append(source),
     )
-    monkeypatch.setattr(pipeline, "_publish_branch", lambda *_args: None)
+    monkeypatch.setattr(publish, "_publish_branch", lambda *_args: None)
     monkeypatch.setattr(pipeline.github, "find_open_pr", lambda *_args: None)
     monkeypatch.setattr(
         pipeline.github,
@@ -237,6 +250,11 @@ def test_exhausted_attempts_mark_needs_human(
     labels: list[tuple[tuple[str, ...], tuple[str, ...]]] = []
 
     monkeypatch.setattr(pipeline.gitops, "refresh_mirror", lambda *args: tmp_path / "mirror.git")
+    monkeypatch.setattr(
+        pipeline,
+        "_wait_for_checks",
+        lambda *_args: "CI: success",
+    )
 
     def clone_source(_mirror: Path, _base: str, destination: Path) -> Path:
         destination.mkdir(parents=True)
@@ -285,6 +303,11 @@ def _prepare_cancellation_pipeline(
         pipeline.gitops,
         "refresh_mirror",
         lambda *_args: tmp_path / "mirror.git",
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "_wait_for_checks",
+        lambda *_args: "CI: success",
     )
 
     def clone_source(_mirror: Path, _base: str, destination: Path) -> Path:
@@ -420,7 +443,7 @@ def test_closed_issue_cancels_before_pull_request(
         lambda *_args: next(checks, False),
     )
     monkeypatch.setattr(
-        pipeline,
+        publish,
         "_publish_branch",
         lambda _config, _worker, _token: published.append("published"),
     )
@@ -471,7 +494,7 @@ def test_issue_state_error_does_not_cancel_the_run(
         "issue_is_open",
         lambda *_args: (_ for _ in ()).throw(GitHubError("offline")),
     )
-    monkeypatch.setattr(pipeline, "_publish_branch", lambda *_args: None)
+    monkeypatch.setattr(publish, "_publish_branch", lambda *_args: None)
     monkeypatch.setattr(
         pipeline.github,
         "create_pr",

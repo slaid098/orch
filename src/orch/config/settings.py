@@ -13,10 +13,12 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from orch.config.logger import get_logger
 from orch.exceptions.config import ConfigError
 from orch.schemas.config.types import (
+    ChecksConfig,
     Config,
     FeedbackConfig,
     LabelsConfig,
     RepoConfig,
+    ReviewerConfig,
     TelegramConfig,
     WatchdogConfig,
     WorkerConfig,
@@ -76,6 +78,8 @@ def _parse_config(
     telegram = _parse_telegram(raw, base_dir)
     feedback = _parse_feedback(raw, repo)
     watchdog = _parse_watchdog(raw)
+    checks = _parse_checks(raw)
+    reviewer = _parse_reviewer(raw)
     data_dir = _resolve_path(str(raw.get("data_dir") or _default_data_dir()), base_dir)
     poll_interval_seconds = _positive_int(
         raw.get("poll_interval_seconds", 30), "poll_interval_seconds"
@@ -98,6 +102,8 @@ def _parse_config(
         telegram=telegram,
         feedback=feedback,
         watchdog=watchdog,
+        checks=checks,
+        reviewer=reviewer,
     )
 
 
@@ -152,7 +158,7 @@ def _parse_worker(raw: dict[str, Any]) -> WorkerConfig:
             maximum=90,
         ),
         max_attempts=_bounded_int(
-            worker_raw.get("max_attempts", 2),
+            worker_raw.get("max_attempts", 3),
             "worker.max_attempts",
             minimum=1,
             maximum=3,
@@ -160,23 +166,23 @@ def _parse_worker(raw: dict[str, Any]) -> WorkerConfig:
         allowed_tools=_optional_str(
             worker_raw, "allowed_tools", "Read,Write,Edit,Bash,Glob,Grep"
         ),
-        autocompact=_parse_autocompact(worker_raw),
+        autocompact=_parse_autocompact(worker_raw, "worker.autocompact"),
         setup_commands=setup_commands,
         test_commands=test_commands,
     )
 
 
-def _parse_autocompact(worker_raw: dict[str, Any]) -> str:
-    value = _optional_str(worker_raw, "autocompact", "200k").lower()
+def _parse_autocompact(raw: dict[str, Any], name: str) -> str:
+    value = _optional_str(raw, "autocompact", "200k").lower()
     if value == "auto":
         return value
     suffix = value.endswith("k")
     digits = value[:-1] if suffix else value
     if not digits.isdigit():
-        raise ConfigError("worker.autocompact must be 'auto' or tokens like 200k")
+        raise ConfigError(f"{name} must be 'auto' or tokens like 200k")
     tokens = int(digits) * (1000 if suffix else 1)
     if not 100_000 <= tokens <= 1_000_000:
-        raise ConfigError("worker.autocompact must be between 100k and 1M tokens")
+        raise ConfigError(f"{name} must be between 100k and 1M tokens")
     return f"{tokens // 1000}k" if tokens % 1000 == 0 else str(tokens)
 
 
@@ -299,6 +305,55 @@ def _parse_watchdog(raw: dict[str, Any]) -> WatchdogConfig:
     )
 
 
+def _parse_checks(raw: dict[str, Any]) -> ChecksConfig:
+    checks_raw = _mapping(raw.get("checks", {}), "checks")
+    return ChecksConfig(
+        timeout_minutes=_bounded_int(
+            checks_raw.get("timeout_minutes", 30),
+            "checks.timeout_minutes",
+            minimum=5,
+            maximum=90,
+        ),
+        poll_seconds=_bounded_int(
+            checks_raw.get("poll_seconds", 15),
+            "checks.poll_seconds",
+            minimum=5,
+            maximum=300,
+        ),
+        discovery_seconds=_bounded_int(
+            checks_raw.get("discovery_seconds", 60),
+            "checks.discovery_seconds",
+            minimum=10,
+            maximum=600,
+        ),
+    )
+
+
+def _parse_reviewer(raw: dict[str, Any]) -> ReviewerConfig:
+    reviewer_raw = _mapping(raw.get("reviewer", {}), "reviewer")
+    return ReviewerConfig(
+        enabled=_bool(reviewer_raw.get("enabled", True), "reviewer.enabled"),
+        image=_nullable_str(reviewer_raw, "image", "reviewer.image"),
+        model=_nullable_str(reviewer_raw, "model", "reviewer.model"),
+        timeout_minutes=_bounded_int(
+            reviewer_raw.get("timeout_minutes", 15),
+            "reviewer.timeout_minutes",
+            minimum=1,
+            maximum=60,
+        ),
+        max_rounds=_bounded_int(
+            reviewer_raw.get("max_rounds", 3),
+            "reviewer.max_rounds",
+            minimum=1,
+            maximum=3,
+        ),
+        autocompact=_parse_autocompact(reviewer_raw, "reviewer.autocompact"),
+        allowed_tools=_optional_str(
+            reviewer_raw, "allowed_tools", "Read,Grep,Glob"
+        ),
+    )
+
+
 def _resolve_telegram_token(token_file: Path | None) -> str | None:
     if token_file is not None:
         token = _read_telegram_token_file(token_file)
@@ -385,6 +440,15 @@ def _optional_str(raw: dict[str, Any], key: str, default: str) -> str:
     value = raw.get(key, default)
     if not isinstance(value, str) or not value.strip():
         raise ConfigError(f"{key} must be a non-empty string")
+    return value.strip()
+
+
+def _nullable_str(raw: dict[str, Any], key: str, name: str) -> str | None:
+    value = raw.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ConfigError(f"{name} must be a non-empty string when set")
     return value.strip()
 
 

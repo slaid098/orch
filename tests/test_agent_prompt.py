@@ -64,4 +64,6 @@ def test_build_prompt_resumes_existing_workspace(tmp_path: Path) -> None:
     assert "## Resume" in prompt
     assert "persistent" in prompt
     assert "Do not re-clone" in prompt
+    assert "committed in `HEAD`" in prompt
+    assert "GH_TOKEN" not in prompt
     assert "tests failed" in prompt

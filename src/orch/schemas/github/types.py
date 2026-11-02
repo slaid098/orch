@@ -43,6 +43,37 @@ class Issue:
 
 
 @dataclass(frozen=True)
+class CheckResult:
+    """One GitHub check or commit-status entry."""
+
+    name: str
+    state: str
+    link: str = ""
+
+
+@dataclass(frozen=True)
+class PullRequestStatus:
+    """The pull-request fields needed by the pipeline gate."""
+
+    number: int
+    url: str
+    state: str
+    mergeable: str
+    head_sha: str
+    checks: tuple[CheckResult, ...]
+
+    @property
+    def failed(self) -> bool:
+        """Return whether any check failed."""
+        return any(check.state == "failure" for check in self.checks)
+
+    @property
+    def pending(self) -> bool:
+        """Return whether any check is still running."""
+        return any(check.state == "pending" for check in self.checks)
+
+
+@dataclass(frozen=True)
 class Comment:
     """A GitHub issue comment used as live worker feedback."""
 

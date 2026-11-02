@@ -320,6 +320,32 @@ def test_run_claude_logs_non_zero_exit(
     )
 
 
+def test_run_claude_uses_the_shared_safe_git_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[str] = []
+
+    def fake_exec(
+        _name: str,
+        command: str,
+        **_kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return _proc()
+
+    monkeypatch.setattr(worker, "exec_in", fake_exec)
+
+    worker._run_claude(
+        "container",
+        _config(Path(".")),
+        Path("run"),
+        time.monotonic() + 30,
+    )
+
+    assert "GIT_CONFIG_GLOBAL=/out/gitconfig" in commands[0]
+    assert "safe.directory /work" in commands[0]
+
+
 def test_write_diff_continues_on_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -356,10 +382,23 @@ def test_bundle_requires_a_file(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(worker, "exec_in", lambda *_args, **_kwargs: _proc())
+    commands: list[str] = []
+
+    def fake_exec(
+        _name: str,
+        command: str,
+        **_kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return _proc()
+
+    monkeypatch.setattr(worker, "exec_in", fake_exec)
 
     with pytest.raises(AgentError, match="missing or empty"):
         worker._bundle("container", "branch", tmp_path, time.monotonic() + 30)
+
+    assert "GIT_CONFIG_GLOBAL=/out/gitconfig" in commands[0]
+    assert "safe.directory /work" in commands[0]
 
 
 def test_remaining_rejects_expired_deadline() -> None:
@@ -417,6 +456,8 @@ def test_checkpoint_saves_patch_status_and_untracked_files(
     )
 
     assert len(commands) == 1
+    assert "GIT_CONFIG_GLOBAL=/out/gitconfig" in commands[0]
+    assert "safe.directory /work" in commands[0]
     assert "checkpoint.patch" in commands[0]
     assert "checkpoint.status" in commands[0]
     assert "checkpoint-untracked.tar.gz" in commands[0]

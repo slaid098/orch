@@ -481,3 +481,156 @@ def test_issue_from_json_reads_state() -> None:
     )
 
     assert issue.state == "CLOSED"
+
+
+def test_get_pr_status_parses_checks_and_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = {
+        "number": 12,
+        "url": "https://example.test/pr/12",
+        "state": "OPEN",
+        "mergeable": "MERGEABLE",
+        "headRefOid": "abc",
+        "statusCheckRollup": [
+            {
+                "__typename": "CheckRun",
+                "name": "pytest",
+                "status": "COMPLETED",
+                "conclusion": "SUCCESS",
+                "detailsUrl": "https://example.test/check/1",
+            },
+            {
+                "__typename": "StatusContext",
+                "context": "lint",
+                "state": "FAILURE",
+                "targetUrl": "https://example.test/check/2",
+            },
+            {
+                "__typename": "CheckRun",
+                "name": "coverage",
+                "status": "IN_PROGRESS",
+                "conclusion": None,
+            },
+        ],
+    }
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        github,
+        "_run_gh",
+        lambda args, _token: calls.append(args) or json.dumps(payload),
+    )
+
+    status = github.get_pr_status(
+        "slaid098/orch",
+        "https://example.test/pr/12",
+        "token",
+    )
+
+    assert status.number == 12
+    assert status.url == "https://example.test/pr/12"
+    assert status.mergeable == "MERGEABLE"
+    assert status.head_sha == "abc"
+    assert [check.state for check in status.checks] == [
+        "success",
+        "failure",
+        "pending",
+    ]
+    assert status.failed
+    assert status.pending
+    assert calls[0][:2] == ["pr", "view"]
+
+
+def test_get_pr_status_treats_unknown_conclusions_as_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = {
+        "number": 12,
+        "url": "https://example.test/pr/12",
+        "state": "OPEN",
+        "mergeable": "UNKNOWN",
+        "headRefOid": "abc",
+        "statusCheckRollup": [
+            {
+                "__typename": "CheckRun",
+                "name": "strange",
+                "status": "COMPLETED",
+                "conclusion": "SOMETHING_NEW",
+            }
+        ],
+    }
+    monkeypatch.setattr(
+        github,
+        "_run_gh",
+        lambda *_args, **_kwargs: json.dumps(payload),
+    )
+
+    status = github.get_pr_status(
+        "slaid098/orch",
+        "https://example.test/pr/12",
+        "token",
+    )
+
+    assert status.failed
+
+
+def test_get_pr_status_rejects_invalid_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(github, "_run_gh", lambda *_args, **_kwargs: "not-json")
+
+    with pytest.raises(github.GitHubError, match="parse"):
+        github.get_pr_status(
+            "slaid098/orch",
+            "https://example.test/pr/12",
+            "token",
+        )
+
+
+def test_merge_pr_uses_squash_and_returns_merge_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        github,
+        "_run_gh",
+        lambda args, _token, **_kwargs: calls.append(args) or (
+            "abc123\n" if args[:2] == ["pr", "view"] else ""
+        ),
+    )
+
+    commit = github.merge_pr(
+        "slaid098/orch",
+        "https://example.test/pr/12",
+        "token",
+    )
+
+    assert commit == "abc123"
+    assert calls[0][:3] == ["pr", "merge", "12"]
+    assert "--squash" in calls[0]
+    assert "--delete-branch" in calls[0]
+    assert calls[1][:3] == ["pr", "view", "12"]
+
+
+def test_merge_pr_keeps_merge_when_commit_lookup_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake(args: list[str], _token: str, **_kwargs: object) -> str:
+        if args[:2] == ["pr", "view"]:
+            raise github.GitHubError("lookup failed")
+        return ""
+
+    monkeypatch.setattr(github, "_run_gh", fake)
+
+    commit = github.merge_pr(
+        "slaid098/orch",
+        "https://example.test/pr/12",
+        "token",
+    )
+
+    assert commit == ""
+
+
+def test_merge_pr_rejects_invalid_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    with pytest.raises(github.GitHubError, match="number"):
+        github.merge_pr("slaid098/orch", "https://example.test/pull/", "token")

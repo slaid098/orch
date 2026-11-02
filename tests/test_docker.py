@@ -269,3 +269,73 @@ def test_run_translates_process_errors(
 
     with pytest.raises(docker.DockerError, match=message):
         docker._run(["docker", "version"], timeout=1)
+
+
+def test_start_reviewer_mounts_repository_read_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+    monkeypatch.setattr(docker, "_image_exists", lambda _image: True)
+    monkeypatch.setattr(
+        docker,
+        "_run",
+        lambda args, **_kwargs: calls.append(args) or _proc("container-id\n"),
+    )
+
+    result = docker.start_reviewer(
+        image="reviewer:latest",
+        name="reviewer",
+        repo_path=tmp_path / "repo",
+        run_dir=tmp_path / "out",
+        model="model",
+    )
+
+    assert result == "container-id"
+    args = calls[0]
+    assert "reviewer" in args
+    assert "orch.reviewer=true" in args
+    assert "--cap-drop" in args
+    assert f"{tmp_path / 'repo'}:/review:ro" in args
+    assert f"{tmp_path / 'out'}:/out" in args
+    assert all("/work" not in arg for arg in args)
+    assert all("GH_TOKEN" not in arg for arg in args)
+
+
+def test_start_reviewer_requires_an_image(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(docker, "_image_exists", lambda _image: False)
+
+    with pytest.raises(docker.DockerError, match="does not exist"):
+        docker.start_reviewer(
+            image="missing:latest",
+            name="reviewer",
+            repo_path=tmp_path / "repo",
+            run_dir=tmp_path / "out",
+            model="model",
+        )
+
+
+def test_exec_in_uses_requested_workdir(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        docker.subprocess,
+        "run",
+        lambda args, **_kwargs: calls.append(args) or _proc("ok"),
+    )
+
+    docker.exec_in("reviewer", "true", timeout=10, workdir="/review")
+
+    assert calls[0][:7] == [
+        "docker",
+        "exec",
+        "-u",
+        "agent",
+        "-w",
+        "/review",
+        "reviewer",
+    ]

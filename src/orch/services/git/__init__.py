@@ -2,6 +2,7 @@
 
 from orch.services.git.service import (
     authenticated_remote,
+    branch_sha,
     cleanup_source,
     cleanup_workspace,
     clone_source,
@@ -12,6 +13,7 @@ from orch.services.git.service import (
 
 __all__ = [
     "authenticated_remote",
+    "branch_sha",
     "cleanup_source",
     "cleanup_workspace",
     "clone_source",

@@ -21,6 +21,11 @@ from orch.services.watchdog.service import Watchdog
 
 log = get_logger(component="worker")
 
+_GIT_ENV = (
+    "export GIT_CONFIG_GLOBAL=/out/gitconfig; "
+    "git config --global --add safe.directory /work; "
+)
+
 
 def build_prompt(
     config: Config,
@@ -68,8 +73,11 @@ def _resume_section(attempt: int, previous_error: str | None) -> str:
         "## Resume\n"
         f"This is attempt {attempt}. The `/work` directory is persistent and "
         "contains work from the previous attempt. Do not re-clone it, reset it, "
-        "or discard changes. Inspect `git status` and `git diff`, continue from "
-        "the existing state, and finish the issue.\n"
+        "or discard changes. Inspect `git status` and `git diff` first. A "
+        "previous successful attempt may already be committed in `HEAD`; use "
+        "`git log -1`, `git show --stat HEAD`, and the files themselves to see "
+        "that work. Continue from the existing state and fix the reported "
+        "problem.\n"
         f"Previous failure: {error}\n\n"
     )
 
@@ -271,7 +279,7 @@ def _checkpoint(
     deadline: float,
 ) -> None:
     """Save tracked and untracked work before replacing the container."""
-    command = (
+    command = _GIT_ENV + (
         "cd /work && "
         f"git diff --binary {base_sha} > /out/checkpoint.patch; "
         "git status --porcelain=v1 > /out/checkpoint.status; "
@@ -391,7 +399,7 @@ def _run_claude(
     run_dir: Path,
     deadline: float,
 ) -> None:
-    command = "cd /work && " + claude.build_command(config)
+    command = _GIT_ENV + "cd /work && " + claude.build_command(config)
     result = exec_in(
         container,
         command,
@@ -410,12 +418,12 @@ def _run_claude(
 def _ensure_changes(container: str, base_sha: str, deadline: float) -> None:
     status = exec_in(
         container,
-        "cd /work && git status --porcelain",
+        _GIT_ENV + "cd /work && git status --porcelain",
         timeout=_remaining(deadline, cap=60),
     )
     commits = exec_in(
         container,
-        f"cd /work && git rev-list --count {base_sha}..HEAD",
+        _GIT_ENV + f"cd /work && git rev-list --count {base_sha}..HEAD",
         timeout=_remaining(deadline, cap=60),
     )
     if status.returncode != 0 or commits.returncode != 0:
@@ -441,7 +449,7 @@ def _finalize_commit(
 ) -> None:
     """Replace any worker commits with one deterministic commit."""
     (run_dir / "commit-message.txt").write_text(title + "\n", encoding="utf-8")
-    command = (
+    command = _GIT_ENV + (
         f"cd /work && git reset --soft {base_sha} && "
         "git add -A && "
         "git commit -F /out/commit-message.txt && "
@@ -465,7 +473,7 @@ def _write_diff(
     run_dir: Path,
     deadline: float,
 ) -> None:
-    command = (
+    command = _GIT_ENV + (
         "cd /work && "
         f"git diff --binary {base_sha}...HEAD "
         "> /out/diff.patch"
@@ -514,7 +522,8 @@ def _bundle(
     bundle = run_dir / "result.bundle"
     _exec_or_raise(
         container,
-        f"cd /work && git bundle create /out/result.bundle refs/heads/{branch}",
+        _GIT_ENV
+        + f"cd /work && git bundle create /out/result.bundle refs/heads/{branch}",
         timeout=_remaining(deadline, cap=300),
         label="bundle",
     )

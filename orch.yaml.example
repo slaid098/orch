@@ -15,13 +15,32 @@ worker:
   image: orch-agent:latest
   model: deepseek-v4.1-flash:cloud
   timeout_minutes: 90
-  max_attempts: 2
+  max_attempts: 3
   autocompact: 200k
   allowed_tools: "Read,Write,Edit,Bash,Glob,Grep"
   setup_commands:
     - uv sync --all-extras
   test_commands:
     - uv run pytest -q
+
+# GitHub checks are polled before the reviewer starts. A failed check returns
+# control to the worker; the reviewer never sees a red pull request.
+checks:
+  timeout_minutes: 30
+  poll_seconds: 15
+  discovery_seconds: 60
+
+# The reviewer runs in a separate read-only container. It has no GitHub token
+# and may only Read, Grep, and Glob. An empty findings array approves; any
+# finding blocks the merge and consumes one shared worker attempt.
+reviewer:
+  enabled: true
+  image: orch-agent:latest
+  model: deepseek-v4.1-flash:cloud
+  timeout_minutes: 15
+  max_rounds: 3
+  autocompact: 200k
+  allowed_tools: "Read,Grep,Glob"
 
 data_dir: D:/orch/app_data
 retention_days: 7
