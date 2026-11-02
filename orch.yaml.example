@@ -27,3 +27,34 @@ data_dir: D:/orch/app_data
 retention_days: 7
 poll_interval_seconds: 30
 max_workers: 2
+
+# One-way status messages. The bot token is read from TELEGRAM_BOT_TOKEN or
+# from a local env file; never put the token in this YAML.
+telegram:
+  enabled: false
+  chat_id: "123456789"
+  # Set this only for a forum topic.
+  message_thread_id: null
+  # token_file: C:/path/to/.env
+
+# Live comments are injected into the running Claude session. Polling starts
+# only after the issue is taken into work.
+feedback:
+  enabled: true
+  live_comments: true
+  poll_seconds: 30
+  allowed_users:
+    - your-github-login
+
+# Clef classifies only when a cheap trigger fires. The policy is deterministic.
+watchdog:
+  enabled: false
+  endpoint: https://ollama.com/v1/systemone
+  model: clef
+  confidence_threshold: 0.7
+  silence_minutes: 10
+  min_run_minutes: 15
+  max_nudges: 2
+  cooldown_minutes: 10
+  check_seconds: 60
+  max_context_chars: 6000

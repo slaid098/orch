@@ -39,6 +39,22 @@ def build_command(config: Config) -> str:
     )
 
 
+def build_stream_command(config: Config) -> str:
+    """Build a long-lived Claude Code command that reads stream-json stdin."""
+    worker = config.worker
+    return (
+        "claude -p "
+        "--input-format stream-json "
+        "--output-format stream-json "
+        "--verbose "
+        "--permission-mode bypassPermissions "
+        "--permission-prompts none "
+        f'--allowedTools "{worker.allowed_tools}" '
+        f"--autocompact {worker.autocompact} "
+        f'--model "{worker.model}"'
+    )
+
+
 def build_settings(config: Config) -> dict[str, Any]:
     """Build the ``~/.claude/settings.json`` payload for a container.
 

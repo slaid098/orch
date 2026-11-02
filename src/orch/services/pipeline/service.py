@@ -2,20 +2,31 @@
 
 from __future__ import annotations
 
-import json
 import time
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
 from orch.config.logger import get_logger
 from orch.exceptions.github import GitHubError
 from orch.exceptions.standards import StandardsError
+from orch.exceptions.worker import RunCancelled, WatchdogStop
 from orch.schemas.config.types import Config
 from orch.schemas.github.types import Issue
 from orch.schemas.pipeline.types import RunOutcome
 from orch.schemas.worker.types import WorkerResult
 from orch.services import git as gitops
 from orch.services import github, store
+from orch.services.feedback.service import CommentFeed
+from orch.services.pipeline.lifecycle import (
+    _STATUS_NEEDS_HUMAN,
+    _STATUS_PR_OPEN,
+    _cancel_run,
+    _park,
+    _park_after_retries,
+    _park_invalid_title,
+    _write_result,
+)
 from orch.services.standards import (
     branch_name,
     format_pr_body,
@@ -25,9 +36,6 @@ from orch.services.standards import (
 from orch.services.worker import run_worker
 
 log = get_logger(component="pipeline")
-
-_STATUS_PR_OPEN = "pr_open"
-_STATUS_NEEDS_HUMAN = "needs_human"
 
 
 def run_issue(
@@ -51,6 +59,7 @@ def run_issue(
         Outcome of the run. Failures become ``needs_human`` rather than raising
         so a daemon worker can release its slot and continue.
     """
+    started_at = time.monotonic()
     run_id = _new_run_id(issue.number)
     run_dir = _create_run_dir(config, issue, run_id)
     repo = config.repo.full_name
@@ -58,7 +67,7 @@ def run_issue(
 
     identity = _resolve_identity(config, issue, token, run_dir, run_id)
     if isinstance(identity, RunOutcome):
-        return identity
+        return _with_run_metrics(identity, issue, started_at)
     title, branch = identity
 
     store.create_run(
@@ -69,7 +78,7 @@ def run_issue(
         branch=branch,
     )
     try:
-        return _start_run(
+        outcome = _start_run(
             config,
             issue,
             token,
@@ -81,7 +90,7 @@ def run_issue(
             claim=claim,
         )
     except Exception as ex:
-        return _park_before_attempts(
+        outcome = _park_before_attempts(
             config,
             issue,
             token,
@@ -90,6 +99,20 @@ def run_issue(
             branch=branch,
             error=ex,
         )
+    return _with_run_metrics(outcome, issue, started_at)
+
+
+def _with_run_metrics(
+    outcome: RunOutcome,
+    issue: Issue,
+    started_at: float,
+) -> RunOutcome:
+    """Attach issue title and elapsed time for notifications and logs."""
+    return replace(
+        outcome,
+        issue_title=issue.title,
+        duration_seconds=max(0, int(time.monotonic() - started_at)),
+    )
 
 
 def _resolve_identity(
@@ -281,7 +304,12 @@ def _comment_attempt_failure(
         "Запускаю следующую попытку в том же workspace с новым контекстом."
     )
     try:
-        github.comment_issue(config.repo.full_name, issue.number, token, message)
+        github.comment_issue(
+            config.repo.full_name,
+            issue.number,
+            token,
+            github.mark_bot_body(message),
+        )
     except Exception as notify_error:
         log.bind(
             issue=issue.number,
@@ -297,7 +325,7 @@ def _best_effort_comment(
     body: str,
 ) -> None:
     try:
-        github.comment_issue(repo, issue_number, token, body)
+        github.comment_issue(repo, issue_number, token, github.mark_bot_body(body))
     except Exception as ex:
         log.bind(
             issue=issue_number,
@@ -343,108 +371,6 @@ def _publish_branch(config: Config, worker: WorkerResult, token: str) -> None:
     gitops.push_branch(bare, worker.branch, remote, token)
 
 
-def _park_invalid_title(
-    config: Config,
-    issue: Issue,
-    token: str,
-    run_dir: Path,
-    run_id: str,
-    error: Exception,
-) -> None:
-    message = (
-        "orch не запустил worker: заголовок issue не соответствует стандарту.\n\n"
-        f"Текущий заголовок: `{issue.title}`\n\n"
-        f"Ошибка: `{type(error).__name__}: {error}`\n\n"
-        "Ожидаемый формат: `type(scope): description`. "
-        "Тип, scope и английское описание обязательны, длина — до 72 символов.\n"
-        f"Run: `{run_id}`\n"
-    )
-    try:
-        github.comment_issue(config.repo.full_name, issue.number, token, message)
-        github.edit_labels(
-            config.repo.full_name,
-            issue.number,
-            token,
-            add=(config.labels.needs_human,),
-            remove=(config.labels.running, config.labels.queued),
-        )
-    except Exception as notify_error:
-        log.bind(
-            issue=issue.number,
-            error=notify_error,
-            error_type=type(notify_error).__name__,
-        ).error("Could not mark invalid issue title as needs-human")
-
-    _write_result(
-        run_dir,
-        {
-            "run_id": run_id,
-            "status": _STATUS_NEEDS_HUMAN,
-            "branch": "",
-            "error": f"{type(error).__name__}: {error}",
-            "attempts": 0,
-        },
-    )
-    store.finish_run(
-        config.data_dir / "orch.db",
-        run_id=run_id,
-        status=_STATUS_NEEDS_HUMAN,
-        error=f"{type(error).__name__}: {error}",
-    )
-
-
-def _park(
-    config: Config,
-    issue: Issue,
-    token: str,
-    run_dir: Path,
-    run_id: str,
-    branch: str,
-    error: Exception,
-    *,
-    attempts: int,
-) -> None:
-    message = (
-        "orch не смог довести issue до PR после всех попыток.\n\n"
-        f"Ошибка: `{type(error).__name__}: {error}`\n\n"
-        f"Попыток: `{attempts}` из `{config.worker.max_attempts}`\n"
-        f"Run: `{run_id}`\n"
-        f"Branch: `{branch}`\n"
-    )
-    try:
-        github.comment_issue(config.repo.full_name, issue.number, token, message)
-        github.edit_labels(
-            config.repo.full_name,
-            issue.number,
-            token,
-            add=(config.labels.needs_human,),
-            remove=(config.labels.running, config.labels.queued),
-        )
-    except Exception as notify_error:
-        log.bind(
-            issue=issue.number,
-            error=notify_error,
-            error_type=type(notify_error).__name__,
-        ).error("Could not mark issue as needs-human on GitHub")
-
-    _write_result(
-        run_dir,
-        {
-            "run_id": run_id,
-            "status": _STATUS_NEEDS_HUMAN,
-            "branch": branch,
-            "error": f"{type(error).__name__}: {error}",
-            "attempts": attempts,
-        },
-    )
-    store.finish_run(
-        config.data_dir / "orch.db",
-        run_id=run_id,
-        status=_STATUS_NEEDS_HUMAN,
-        error=f"{type(error).__name__}: {error}",
-    )
-
-
 def _success_comment(
     worker: WorkerResult,
     pr_url: str,
@@ -471,6 +397,17 @@ def _run_attempts(
 ) -> RunOutcome:
     workspace = _workspace_path(config, issue)
     source: Path | None = None
+    feed: CommentFeed | None = None
+    initial_context = ""
+    if config.feedback.enabled and config.feedback.live_comments:
+        feed = CommentFeed(
+            config,
+            issue,
+            token,
+            state_path=run_dir / "feedback.json",
+        )
+        initial_context = feed.initial_context()
+        feed.start()
     try:
         mirror = gitops.refresh_mirror(
             config.data_dir,
@@ -495,8 +432,12 @@ def _run_attempts(
             timeout_seconds=timeout_seconds,
             source=source,
             workspace=workspace,
+            feed=feed,
+            initial_context=initial_context,
         )
     finally:
+        if feed is not None:
+            feed.stop()
         if source is not None:
             gitops.cleanup_source(source)
 
@@ -513,41 +454,42 @@ def _retry_until_success(
     timeout_seconds: int,
     source: Path,
     workspace: Path,
+    feed: CommentFeed | None,
+    initial_context: str,
 ) -> RunOutcome:
     last_error: Exception | None = None
     for attempt in range(1, config.worker.max_attempts + 1):
         try:
-            worker = _run_worker_attempt(
+            return _run_attempt(
                 config,
                 issue,
-                run_dir / f"attempt-{attempt}",
+                token,
+                run_id=run_id,
+                run_dir=run_dir,
+                branch=branch,
+                title=title,
+                timeout_seconds=timeout_seconds,
                 source=source,
                 workspace=workspace,
+                feed=feed,
+                initial_context=initial_context,
                 attempt=attempt,
                 previous_error=last_error,
-                timeout_seconds=timeout_seconds,
-            )
-            return _finish_success(
-                config,
-                issue,
-                token,
-                worker,
-                run_dir=run_dir,
-                run_id=run_id,
-                attempt=attempt,
-                title=title,
             )
         except Exception as ex:
-            last_error = ex
-            _handle_attempt_failure(
+            outcome = _retry_outcome(
                 config,
                 issue,
                 token,
+                ex,
                 run_id=run_id,
-                attempt=attempt,
+                run_dir=run_dir,
                 branch=branch,
-                error=ex,
+                attempt=attempt,
             )
+            if outcome is not None:
+                return outcome
+            last_error = ex
 
     error = last_error or RuntimeError("No attempt produced a pull request")
     return _park_after_retries(
@@ -558,36 +500,190 @@ def _retry_until_success(
         run_id=run_id,
         branch=branch,
         error=error,
+        attempts=config.worker.max_attempts,
     )
 
 
-def _park_after_retries(
+def _retry_outcome(
+    config: Config,
+    issue: Issue,
+    token: str,
+    error: Exception,
+    *,
+    run_id: str,
+    run_dir: Path,
+    branch: str,
+    attempt: int,
+) -> RunOutcome | None:
+    if isinstance(error, RunCancelled):
+        return _cancel_run(
+            config,
+            issue,
+            run_dir,
+            run_id,
+            branch,
+            str(error) or "issue closed",
+            attempts=attempt,
+        )
+    if isinstance(error, WatchdogStop):
+        return _park_after_retries(
+            config,
+            issue,
+            token,
+            run_dir=run_dir,
+            run_id=run_id,
+            branch=branch,
+            error=error,
+            attempts=attempt,
+        )
+    _handle_attempt_failure(
+        config,
+        issue,
+        token,
+        run_id=run_id,
+        attempt=attempt,
+        branch=branch,
+        error=error,
+    )
+    return None
+
+
+def _run_attempt(
     config: Config,
     issue: Issue,
     token: str,
     *,
-    run_dir: Path,
     run_id: str,
+    run_dir: Path,
     branch: str,
-    error: Exception,
+    title: str,
+    timeout_seconds: int,
+    source: Path,
+    workspace: Path,
+    feed: CommentFeed | None,
+    initial_context: str,
+    attempt: int,
+    previous_error: Exception | None,
 ) -> RunOutcome:
-    _park(
+    cancelled = _cancel_if_needed(
         config,
         issue,
         token,
+        feed,
+        run_dir=run_dir,
+        run_id=run_id,
+        branch=branch,
+        attempts=attempt - 1,
+    )
+    if cancelled is not None:
+        return cancelled
+    worker = _run_worker_attempt(
+        config,
+        issue,
+        run_dir / f"attempt-{attempt}",
+        source=source,
+        workspace=workspace,
+        attempt=attempt,
+        previous_error=previous_error,
+        timeout_seconds=timeout_seconds,
+        feedback=feed,
+        initial_context=initial_context if attempt == 1 else "",
+    )
+    return _finish_or_cancel(
+        config,
+        issue,
+        token,
+        worker,
+        feed,
+        run_dir=run_dir,
+        run_id=run_id,
+        branch=branch,
+        attempt=attempt,
+        title=title,
+    )
+
+
+def _finish_or_cancel(
+    config: Config,
+    issue: Issue,
+    token: str,
+    worker: WorkerResult,
+    feed: CommentFeed | None,
+    *,
+    run_dir: Path,
+    run_id: str,
+    branch: str,
+    attempt: int,
+    title: str,
+) -> RunOutcome:
+    cancelled = _cancel_if_needed(
+        config,
+        issue,
+        token,
+        feed,
+        run_dir=run_dir,
+        run_id=run_id,
+        branch=branch,
+        attempts=attempt,
+    )
+    if cancelled is not None:
+        return cancelled
+    return _finish_success(
+        config,
+        issue,
+        token,
+        worker,
+        run_dir=run_dir,
+        run_id=run_id,
+        attempt=attempt,
+        title=title,
+    )
+
+
+def _cancel_if_needed(
+    config: Config,
+    issue: Issue,
+    token: str,
+    feed: CommentFeed | None,
+    *,
+    run_dir: Path,
+    run_id: str,
+    branch: str,
+    attempts: int,
+) -> RunOutcome | None:
+    reason = _cancellation_reason(config, issue, token, feed)
+    if reason is None:
+        return None
+    return _cancel_run(
+        config,
+        issue,
         run_dir,
         run_id,
         branch,
-        error,
-        attempts=config.worker.max_attempts,
+        reason,
+        attempts=attempts,
     )
-    return RunOutcome(
-        run_id=run_id,
-        status=_STATUS_NEEDS_HUMAN,
-        run_dir=run_dir,
-        branch=branch,
-        error=str(error),
-    )
+
+
+def _cancellation_reason(
+    config: Config,
+    issue: Issue,
+    token: str,
+    feed: CommentFeed | None,
+) -> str | None:
+    if feed is not None and feed.cancelled:
+        return feed.cancel_reason or "issue closed"
+    try:
+        is_open = github.issue_is_open(config.repo.full_name, issue.number, token)
+    except GitHubError as ex:
+        log.bind(
+            issue=issue.number,
+            error=ex,
+            error_type=type(ex).__name__,
+        ).warning("Could not verify that the issue is still open; continuing")
+        return None
+    else:
+        return None if is_open else "issue closed"
 
 
 def _run_worker_attempt(
@@ -600,6 +696,8 @@ def _run_worker_attempt(
     attempt: int,
     previous_error: Exception | None,
     timeout_seconds: int,
+    feedback: CommentFeed | None,
+    initial_context: str,
 ) -> WorkerResult:
     attempt_started = time.monotonic()
     log.info(
@@ -609,6 +707,11 @@ def _run_worker_attempt(
         config.worker.max_attempts,
     )
     remaining = _remaining_attempt_seconds(attempt_started, timeout_seconds)
+    extra: dict[str, object] = {}
+    if feedback is not None:
+        extra["feedback"] = feedback
+    if initial_context:
+        extra["initial_context"] = initial_context
     worker = run_worker(
         config,
         issue,
@@ -618,6 +721,7 @@ def _run_worker_attempt(
         attempt=attempt,
         previous_error=str(previous_error) if previous_error else None,
         timeout_seconds=remaining,
+        **extra,
     )
     validate_branch(worker.branch, issue.number)
     expected_branch = branch_name(issue.title, issue.number)
@@ -639,28 +743,15 @@ def _finish_success(
     attempt: int,
     title: str,
 ) -> RunOutcome:
-    repo = config.repo.full_name
-    _publish_branch(config, worker, token)
-    pr_url = github.create_pr(
-        repo,
+    _ensure_issue_open(config, issue, token)
+    pr_url = _publish_success(
+        config,
+        issue,
         token,
-        head=worker.branch,
-        base=config.repo.base_branch,
+        worker,
+        run_id=run_id,
+        attempt=attempt,
         title=title,
-        body=format_pr_body(worker.handoff, issue.number),
-    )
-    _best_effort_comment(
-        repo,
-        issue.number,
-        token,
-        _success_comment(worker, pr_url, run_id, attempt),
-    )
-    _best_effort_labels(
-        repo,
-        issue.number,
-        token,
-        add=(config.labels.pr_open,),
-        remove=(config.labels.running, config.labels.needs_human),
     )
     _write_result(
         run_dir,
@@ -688,6 +779,60 @@ def _finish_success(
         branch=worker.branch,
         pr_url=pr_url,
     )
+
+
+def _ensure_issue_open(config: Config, issue: Issue, token: str) -> None:
+    try:
+        is_open = github.issue_is_open(
+            config.repo.full_name,
+            issue.number,
+            token,
+        )
+    except GitHubError as ex:
+        log.bind(
+            issue=issue.number,
+            error=ex,
+            error_type=type(ex).__name__,
+        ).warning("Could not verify the issue before opening a PR; continuing")
+    else:
+        if not is_open:
+            raise RunCancelled("issue closed before pull request creation")
+
+
+def _publish_success(
+    config: Config,
+    issue: Issue,
+    token: str,
+    worker: WorkerResult,
+    *,
+    run_id: str,
+    attempt: int,
+    title: str,
+) -> str:
+    repo = config.repo.full_name
+    _publish_branch(config, worker, token)
+    pr_url = github.create_pr(
+        repo,
+        token,
+        head=worker.branch,
+        base=config.repo.base_branch,
+        title=title,
+        body=format_pr_body(worker.handoff, issue.number),
+    )
+    _best_effort_comment(
+        repo,
+        issue.number,
+        token,
+        _success_comment(worker, pr_url, run_id, attempt),
+    )
+    _best_effort_labels(
+        repo,
+        issue.number,
+        token,
+        add=(config.labels.pr_open,),
+        remove=(config.labels.running, config.labels.needs_human),
+    )
+    return pr_url
 
 
 def _handle_attempt_failure(
@@ -726,10 +871,3 @@ def _create_run_dir(config: Config, issue: Issue, run_id: str) -> Path:
     )
     run_dir.mkdir(parents=True, exist_ok=True)
     return run_dir
-
-
-def _write_result(run_dir: Path, payload: dict[str, object]) -> None:
-    (run_dir / "result.json").write_text(
-        json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-    )

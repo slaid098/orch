@@ -8,13 +8,16 @@ import time
 from pathlib import Path
 
 import orch.services.worker.claude as claude
+import orch.services.worker.session as session
 from orch.config.logger import get_logger
-from orch.exceptions.worker import AgentError
+from orch.exceptions.worker import AgentError, RunCancelled, WatchdogStop
 from orch.schemas.config.types import Config
 from orch.schemas.github.types import Issue
 from orch.schemas.worker.types import WorkerResult
 from orch.services.docker import exec_in, start_worker, stop
+from orch.services.feedback.service import CommentFeed
 from orch.services.standards import branch_name, load_handoff
+from orch.services.watchdog.service import Watchdog
 
 log = get_logger(component="worker")
 
@@ -25,6 +28,7 @@ def build_prompt(
     *,
     attempt: int = 1,
     previous_error: str | None = None,
+    initial_context: str = "",
 ) -> str:
     """Build the complete prompt sent to the worker agent."""
     role_path = Path(__file__).parent / "prompt.md"
@@ -38,6 +42,7 @@ def build_prompt(
         f"#{issue.number}: {issue.title}\n\n"
         f"{issue.body}\n"
         "</issue>\n\n"
+        f"{initial_context}"
         "## Repository\n"
         f"- `{config.repo.full_name}`\n"
         f"- Base branch: `{config.repo.base_branch}`\n"
@@ -79,6 +84,8 @@ def run_worker(
     attempt: int = 1,
     previous_error: str | None = None,
     timeout_seconds: int,
+    feedback: CommentFeed | None = None,
+    initial_context: str = "",
 ) -> WorkerResult:
     """Run one worker container and return its artifacts.
 
@@ -91,22 +98,28 @@ def run_worker(
         attempt: One-based attempt number.
         previous_error: Failure from the previous attempt, used for handoff.
         timeout_seconds: Hard budget for this whole attempt.
+        feedback: Optional live comment feed for stream-json injection.
+        initial_context: Comments fetched before the worker started.
 
     Returns:
         Successful worker result.
 
     Raises:
         AgentError: If the worker fails, produces no changes, or tests fail.
+        RunCancelled: If the issue is closed while the worker runs.
+        WatchdogStop: If Clef decides that the run must stop.
         DockerError: If the container cannot be managed.
     """
     run_dir.mkdir(parents=True, exist_ok=True)
     workspace_path.mkdir(parents=True, exist_ok=True)
+    (run_dir / "handoff.json").unlink(missing_ok=True)
     branch = branch_name(issue.title, issue.number)
     prompt = build_prompt(
         config,
         issue,
         attempt=attempt,
         previous_error=previous_error,
+        initial_context=initial_context,
     )
     (run_dir / "prompt.md").write_text(prompt, encoding="utf-8")
 
@@ -124,22 +137,18 @@ def run_worker(
     )
 
     try:
-        _write_settings(container, config, deadline)
-        base_sha = _prepare_workspace(container, branch, deadline)
-        _run_setup(container, config, deadline)
-        _run_claude(container, config, run_dir, deadline)
-        _ensure_changes(container, base_sha, deadline)
-        handoff = load_handoff(run_dir)
-        _finalize_commit(container, base_sha, issue.title, run_dir, deadline)
-        _write_diff(container, base_sha, run_dir, deadline)
-        tests_output = _run_tests(container, config, run_dir, deadline)
-        bundle = _bundle(container, branch, run_dir, deadline)
-        return WorkerResult(
-            run_dir=run_dir,
-            branch=branch,
-            handoff=handoff,
-            tests_output=tests_output,
-            bundle_path=bundle,
+        base_sha = _prepare_attempt(container, config, branch, deadline)
+        return _complete_attempt(
+            container,
+            config,
+            issue,
+            run_dir,
+            branch,
+            base_sha,
+            deadline,
+            prompt,
+            feedback=feedback,
+            workspace_path=workspace_path,
         )
     except Exception:
         if base_sha is not None:
@@ -147,6 +156,91 @@ def run_worker(
         raise
     finally:
         stop(container)
+
+
+def _prepare_attempt(
+    container: str,
+    config: Config,
+    branch: str,
+    deadline: float,
+) -> str:
+    _write_settings(container, config, deadline)
+    base_sha = _prepare_workspace(container, branch, deadline)
+    _run_setup(container, config, deadline)
+    return base_sha
+
+
+def _complete_attempt(
+    container: str,
+    config: Config,
+    issue: Issue,
+    run_dir: Path,
+    branch: str,
+    base_sha: str,
+    deadline: float,
+    prompt: str,
+    *,
+    feedback: CommentFeed | None,
+    workspace_path: Path,
+) -> WorkerResult:
+    _run_agent(
+        container,
+        config,
+        issue,
+        run_dir,
+        deadline,
+        prompt,
+        feedback=feedback,
+        workspace_path=workspace_path,
+    )
+    _ensure_changes(container, base_sha, deadline)
+    handoff = load_handoff(run_dir)
+    _finalize_commit(container, base_sha, issue.title, run_dir, deadline)
+    _write_diff(container, base_sha, run_dir, deadline)
+    tests_output = _run_tests(container, config, run_dir, deadline)
+    bundle = _bundle(container, branch, run_dir, deadline)
+    return WorkerResult(
+        run_dir=run_dir,
+        branch=branch,
+        handoff=handoff,
+        tests_output=tests_output,
+        bundle_path=bundle,
+    )
+
+
+def _run_agent(
+    container: str,
+    config: Config,
+    issue: Issue,
+    run_dir: Path,
+    deadline: float,
+    prompt: str,
+    *,
+    feedback: CommentFeed | None,
+    workspace_path: Path,
+) -> None:
+    if config.feedback.live_comments or config.watchdog.enabled:
+        watchdog = (
+            Watchdog(
+                config.watchdog,
+                issue_number=issue.number,
+                issue_title=issue.title,
+                workspace_path=workspace_path,
+            )
+            if config.watchdog.enabled
+            else None
+        )
+        _run_claude_session(
+            container,
+            config,
+            run_dir,
+            deadline,
+            prompt,
+            feedback=feedback,
+            watchdog=watchdog,
+        )
+    else:
+        _run_claude(container, config, run_dir, deadline)
 
 
 def _write_settings(
@@ -254,6 +348,41 @@ def _run_setup(container: str, config: Config, deadline: float) -> None:
         timeout=_remaining(deadline, cap=900),
         label="setup",
     )
+
+
+def _run_claude_session(
+    container: str,
+    config: Config,
+    run_dir: Path,
+    deadline: float,
+    prompt: str,
+    *,
+    feedback: CommentFeed | None,
+    watchdog: Watchdog | None,
+) -> None:
+    """Run Claude Code with stream-json input and optional live injection."""
+    result = session.run_session(
+        container,
+        config,
+        run_dir,
+        prompt,
+        deadline,
+        feedback=feedback,
+        watchdog=watchdog,
+        completion_path=run_dir / "handoff.json",
+    )
+    if result.cancelled:
+        raise RunCancelled(result.cancel_reason or "issue closed")
+    if result.stopped_by_watchdog:
+        raise WatchdogStop(result.watchdog_reason or "watchdog stopped the run")
+    if result.timed_out:
+        raise AgentError("Attempt timed out")
+    if result.returncode != 0:
+        log.bind(container=container, returncode=result.returncode).warning(
+            "Claude Code session exited with a non-zero status; checking for changes"
+        )
+    else:
+        log.info("Claude Code session finished")
 
 
 def _run_claude(

@@ -257,14 +257,14 @@ def test_load_config_rejects_invalid_shapes(
         load_config(config_path)
 
 
-def test_load_config_uses_github_token_fallback(
+def test_load_config_uses_gh_token_and_ignores_ambient_github_token(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repo_path = tmp_path / "repo"
     (repo_path / ".git").mkdir(parents=True)
-    monkeypatch.delenv("GH_TOKEN", raising=False)
-    monkeypatch.setenv("GITHUB_TOKEN", " fallback ")
+    monkeypatch.setenv("GH_TOKEN", " explicit ")
+    monkeypatch.setenv("GITHUB_TOKEN", " wrong-account ")
     config_path = _write_config(
         tmp_path,
         f"""
@@ -280,7 +280,33 @@ worker:
 
     config = load_config(config_path)
 
-    assert config.gh_token == "fallback"
+    assert config.gh_token == "explicit"
+
+
+def test_load_config_does_not_use_ambient_github_token(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_path = tmp_path / "repo"
+    (repo_path / ".git").mkdir(parents=True)
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.setenv("GITHUB_TOKEN", "wrong-account")
+    config_path = _write_config(
+        tmp_path,
+        f"""
+repo:
+  owner: slaid098
+  name: orch
+  path: {repo_path.as_posix()}
+worker:
+  test_commands:
+    - pytest
+""",
+    )
+
+    config = load_config(config_path)
+
+    assert config.gh_token is None
 
 
 def test_load_config_rejects_non_git_repo(tmp_path: Path) -> None:
@@ -366,6 +392,215 @@ worker:
   test_commands:
     - pytest
 retention_days: {value}
+""",
+    )
+
+    with pytest.raises(ConfigError):
+        load_config(config_path)
+
+
+def test_load_config_reads_notification_feedback_and_watchdog(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_path = tmp_path / "repo"
+    (repo_path / ".git").mkdir(parents=True)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "bot-token")
+    monkeypatch.setenv("OLLAMA_API_KEY", "ollama-key")
+    config_path = _write_config(
+        tmp_path,
+        f"""
+repo:
+  owner: slaid098
+  name: orch
+  path: {repo_path.as_posix()}
+worker:
+  test_commands:
+    - pytest
+telegram:
+  enabled: true
+  chat_id: "123"
+  message_thread_id: 42
+  api_base: https://telegram.example
+feedback:
+  enabled: true
+  live_comments: true
+  poll_seconds: 7
+  allowed_users:
+    - alice
+watchdog:
+  enabled: true
+  endpoint: https://clef.example/v1
+  model: custom-clef
+  confidence_threshold: 0.8
+  silence_minutes: 12
+  min_run_minutes: 20
+  max_nudges: 1
+  cooldown_minutes: 15
+  check_seconds: 90
+  max_context_chars: 8000
+""",
+    )
+
+    config = load_config(config_path)
+
+    assert config.telegram.enabled
+    assert config.telegram.chat_id == "123"
+    assert config.telegram.message_thread_id == 42
+    assert config.telegram.token == "bot-token"
+    assert config.telegram.api_base == "https://telegram.example"
+    assert config.feedback.live_comments
+    assert config.feedback.poll_seconds == 7
+    assert config.feedback.allowed_users == ("alice",)
+    assert config.watchdog.enabled
+    assert config.watchdog.endpoint == "https://clef.example/v1"
+    assert config.watchdog.model == "custom-clef"
+    assert config.watchdog.api_key == "ollama-key"
+    assert config.watchdog.confidence_threshold == 0.8
+    assert config.watchdog.max_nudges == 1
+    assert config.watchdog.max_context_chars == 8000
+
+
+def test_telegram_token_can_come_from_a_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_path = tmp_path / "repo"
+    (repo_path / ".git").mkdir(parents=True)
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    token_file = tmp_path / "telegram.env"
+    token_file.write_text("OTHER=x\nTELEGRAM_BOT_TOKEN='from-file'\n", encoding="utf-8")
+    config_path = _write_config(
+        tmp_path,
+        f"""
+repo:
+  owner: slaid098
+  name: orch
+  path: {repo_path.as_posix()}
+worker:
+  test_commands:
+    - pytest
+telegram:
+  enabled: true
+  chat_id: "123"
+  token_file: {token_file.as_posix()}
+""",
+    )
+
+    config = load_config(config_path)
+
+    assert config.telegram.token == "from-file"
+
+
+def test_enabled_telegram_requires_a_token(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_path = tmp_path / "repo"
+    (repo_path / ".git").mkdir(parents=True)
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    config_path = _write_config(
+        tmp_path,
+        f"""
+repo:
+  owner: slaid098
+  name: orch
+  path: {repo_path.as_posix()}
+worker:
+  test_commands:
+    - pytest
+telegram:
+  enabled: true
+  chat_id: "123"
+""",
+    )
+
+    with pytest.raises(ConfigError, match="bot token"):
+        load_config(config_path)
+
+
+def test_enabled_telegram_requires_a_chat_id(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_path = tmp_path / "repo"
+    (repo_path / ".git").mkdir(parents=True)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "token")
+    config_path = _write_config(
+        tmp_path,
+        f"""
+repo:
+  owner: slaid098
+  name: orch
+  path: {repo_path.as_posix()}
+worker:
+  test_commands:
+    - pytest
+telegram:
+  enabled: true
+""",
+    )
+
+    with pytest.raises(ConfigError, match="chat_id"):
+        load_config(config_path)
+
+
+def test_enabled_watchdog_requires_an_ollama_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_path = tmp_path / "repo"
+    (repo_path / ".git").mkdir(parents=True)
+    monkeypatch.setattr(
+        "orch.config.settings._resolve_ollama_key",
+        lambda: None,
+    )
+    config_path = _write_config(
+        tmp_path,
+        f"""
+repo:
+  owner: slaid098
+  name: orch
+  path: {repo_path.as_posix()}
+worker:
+  test_commands:
+    - pytest
+watchdog:
+  enabled: true
+""",
+    )
+
+    with pytest.raises(ConfigError, match="Ollama Cloud key"):
+        load_config(config_path)
+
+
+@pytest.mark.parametrize(
+    ("section", "body"),
+    [
+        ("telegram", 'enabled: "yes"'),
+        ("feedback", "poll_seconds: 0"),
+        ("watchdog", "confidence_threshold: 2"),
+    ],
+)
+def test_load_config_rejects_invalid_feature_settings(
+    tmp_path: Path,
+    section: str,
+    body: str,
+) -> None:
+    repo_path = tmp_path / "repo"
+    (repo_path / ".git").mkdir(parents=True)
+    config_path = _write_config(
+        tmp_path,
+        f"""
+repo:
+  owner: slaid098
+  name: orch
+  path: {repo_path.as_posix()}
+worker:
+  test_commands:
+    - pytest
+{section}:
+  {body}
 """,
     )
 

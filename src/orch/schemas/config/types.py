@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -47,6 +47,44 @@ class WorkerConfig:
 
 
 @dataclass(frozen=True)
+class TelegramConfig:
+    """One-way Telegram notification settings."""
+
+    enabled: bool = False
+    chat_id: str = ""
+    message_thread_id: int | None = None
+    token: str | None = None
+    api_base: str = "https://api.telegram.org"
+
+
+@dataclass(frozen=True)
+class FeedbackConfig:
+    """Live issue-comment feedback settings."""
+
+    enabled: bool = True
+    live_comments: bool = False
+    poll_seconds: int = 30
+    allowed_users: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class WatchdogConfig:
+    """Clef-based hang and loop supervision settings."""
+
+    enabled: bool = False
+    endpoint: str = "https://ollama.com/v1/systemone"
+    model: str = "clef"
+    api_key: str | None = None
+    confidence_threshold: float = 0.7
+    silence_minutes: int = 10
+    min_run_minutes: int = 15
+    max_nudges: int = 2
+    cooldown_minutes: int = 10
+    check_seconds: int = 60
+    max_context_chars: int = 6000
+
+
+@dataclass(frozen=True)
 class Config:
     """Complete orchestrator configuration."""
 
@@ -58,3 +96,6 @@ class Config:
     max_workers: int = 2
     retention_days: int = 7
     gh_token: str | None = None
+    telegram: TelegramConfig = field(default_factory=TelegramConfig)
+    feedback: FeedbackConfig = field(default_factory=FeedbackConfig)
+    watchdog: WatchdogConfig = field(default_factory=WatchdogConfig)
