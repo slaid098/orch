@@ -55,8 +55,22 @@ uv run python main.py
 ```
 
 The daemon runs at most `max_workers` containers (default 2, maximum 3) and
-waits for active workers on shutdown. On startup it removes orphan containers
-from a previous process and re-queues issues left in `agent:running`.
+waits for active workers on shutdown. On startup it reconciles state left by a
+previous process; see [Daemon restart recovery](#daemon-restart-recovery).
+
+## Daemon restart recovery
+
+When the daemon starts, it cleans up after a previous process before polling:
+
+- Worker containers labelled `orch.managed=true` are removed.
+- Runs still marked `running` in the local database are marked `interrupted`.
+- Issues left in `agent:running` are commented, moved back to `agent:queued`,
+  and picked up again.
+
+The workspace under `data/workspaces/<owner>__<repo>/issue-N` is kept. The next
+attempt continues in the same directory with a fresh worker context and a short
+handoff, so uncommitted and untracked work survives the restart. The workspace
+is deleted only after orch opens a pull request.
 
 ## Live smoke test
 
