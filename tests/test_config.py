@@ -492,6 +492,37 @@ telegram:
     assert config.telegram.token == "from-file"
 
 
+def test_telegram_token_file_wins_over_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_path = tmp_path / "repo"
+    (repo_path / ".git").mkdir(parents=True)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "ambient-token")
+    token_file = tmp_path / "telegram.env"
+    token_file.write_text("TELEGRAM_BOT_TOKEN=from-file\n", encoding="utf-8")
+    config_path = _write_config(
+        tmp_path,
+        f"""
+repo:
+  owner: slaid098
+  name: orch
+  path: {repo_path.as_posix()}
+worker:
+  test_commands:
+    - pytest
+telegram:
+  enabled: true
+  chat_id: "123"
+  token_file: {token_file.as_posix()}
+""",
+    )
+
+    config = load_config(config_path)
+
+    assert config.telegram.token == "from-file"
+
+
 def test_enabled_telegram_requires_a_token(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
