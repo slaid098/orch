@@ -31,6 +31,33 @@ untracked work can be recovered even if the workspace is damaged. The next
 attempt continues in the same directory with a fresh context and a short
 handoff. The workspace is deleted only after a pull request is created.
 
+## Workspace recovery
+
+The worker container is disposable, the workspace is not: every attempt mounts
+the same host directory at `/work`:
+
+```text
+<data_dir>/workspaces/<owner>__<repo>/issue-N
+```
+
+When an attempt fails, times out, or is interrupted, orch recreates the
+container but keeps this directory and reuses it. The branch, the `orch-base`
+tag, and tracked and untracked changes remain on disk, so the next attempt
+resumes from the existing state in a fresh agent context; its `prompt.md` gets
+a `## Resume` section with the previous error. The directory is removed only
+after a pull request is created; if attempts are exhausted, it stays for
+inspection.
+
+`checkpoint.patch`, `checkpoint.status`, and `checkpoint-untracked.tar.gz` in
+`<data_dir>/runs/<owner>__<repo>/issue-N/<run-id>/attempt-N/` are a fallback if
+the workspace itself is damaged.
+
+To verify recovery, run
+`git -C <data_dir>/workspaces/<owner>__<repo>/issue-N status` and
+`git -C <data_dir>/workspaces/<owner>__<repo>/issue-N log --oneline`, and check
+that the attempt directory holds the checkpoints and the next attempt's
+`prompt.md` contains a `## Resume` section.
+
 ## Requirements
 
 - Python 3.14
