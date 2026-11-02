@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+from orch.exceptions.github import GitHubError
+from orch.exceptions.worker import RunCancelled, WatchdogStop
 from orch.schemas.config.types import Config, LabelsConfig, RepoConfig, WorkerConfig
 from orch.schemas.github.types import Issue
 from orch.schemas.standards.types import Handoff
@@ -273,3 +275,231 @@ def test_exhausted_attempts_mark_needs_human(
         ("agent:running", "agent:queued"),
     )
     assert _run_status(config.data_dir / "orch.db") == "needs_human"
+
+
+def _prepare_cancellation_pipeline(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        pipeline.gitops,
+        "refresh_mirror",
+        lambda *_args: tmp_path / "mirror.git",
+    )
+
+    def clone_source(_mirror: Path, _base: str, destination: Path) -> Path:
+        destination.mkdir(parents=True)
+        return destination
+
+    monkeypatch.setattr(pipeline.gitops, "clone_source", clone_source)
+    monkeypatch.setattr(pipeline.gitops, "cleanup_source", lambda _source: None)
+    monkeypatch.setattr(pipeline.github, "find_open_pr", lambda *_args: None)
+    monkeypatch.setattr(pipeline.github, "edit_labels", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(pipeline.github, "comment_issue", lambda *_args, **_kwargs: None)
+
+
+def test_closed_issue_is_cancelled_before_worker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    store.init_db(config.data_dir / "orch.db")
+    _prepare_cancellation_pipeline(monkeypatch, tmp_path)
+    monkeypatch.setattr(pipeline.github, "issue_is_open", lambda *_args: False)
+    monkeypatch.setattr(
+        pipeline,
+        "run_worker",
+        lambda *_args, **_kwargs: pytest.fail("worker must not start"),
+    )
+
+    outcome = pipeline.run_issue(
+        config,
+        _issue(),
+        "token",
+        attempt_timeout_seconds=10,
+    )
+
+    assert outcome.status == "cancelled"
+    assert outcome.error == "issue closed"
+    assert _run_status(config.data_dir / "orch.db") == "cancelled"
+
+
+def test_worker_cancellation_does_not_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    store.init_db(config.data_dir / "orch.db")
+    calls: list[int] = []
+    _prepare_cancellation_pipeline(monkeypatch, tmp_path)
+    monkeypatch.setattr(pipeline.github, "issue_is_open", lambda *_args: True)
+
+    def run_worker(*_args: object, **kwargs: object) -> WorkerResult:
+        calls.append(int(kwargs.get("attempt", 0)))
+        raise RunCancelled("closed during run")
+
+    monkeypatch.setattr(pipeline, "run_worker", run_worker)
+
+    outcome = pipeline.run_issue(
+        config,
+        _issue(),
+        "token",
+        attempt_timeout_seconds=10,
+    )
+
+    assert outcome.status == "cancelled"
+    assert calls == [1]
+    assert _run_status(config.data_dir / "orch.db") == "cancelled"
+
+
+def test_watchdog_stop_parks_without_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    store.init_db(config.data_dir / "orch.db")
+    calls: list[int] = []
+    comments: list[str] = []
+    labels: list[tuple[tuple[str, ...], tuple[str, ...]]] = []
+    deleted: list[str] = []
+    _prepare_cancellation_pipeline(monkeypatch, tmp_path)
+    monkeypatch.setattr(pipeline.github, "issue_is_open", lambda *_args: True)
+    monkeypatch.setattr(
+        pipeline.github,
+        "comment_issue",
+        lambda _repo, _number, _token, body: comments.append(body),
+    )
+    monkeypatch.setattr(
+        pipeline.github,
+        "edit_labels",
+        lambda _repo, _number, _token, *, add, remove: labels.append((add, remove)),
+    )
+    monkeypatch.setattr(
+        pipeline.github,
+        "delete_branch",
+        lambda _repo, branch, _token: deleted.append(branch),
+    )
+
+    def run_worker(*_args: object, **kwargs: object) -> WorkerResult:
+        calls.append(int(kwargs.get("attempt", 0)))
+        raise WatchdogStop("loop confirmed")
+
+    monkeypatch.setattr(pipeline, "run_worker", run_worker)
+
+    outcome = pipeline.run_issue(
+        config,
+        _issue(),
+        "token",
+        attempt_timeout_seconds=10,
+    )
+
+    assert outcome.status == "needs_human"
+    assert calls == [1]
+    assert deleted == []
+    assert labels[-1] == (
+        ("agent:needs-human",),
+        ("agent:running", "agent:queued"),
+    )
+    assert any("loop confirmed" in body for body in comments)
+    assert any("Попыток: `1` из `2`" in body for body in comments)
+
+
+def test_closed_issue_cancels_before_pull_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    store.init_db(config.data_dir / "orch.db")
+    checks = iter([True, False])
+    published: list[str] = []
+    prs: list[str] = []
+    _prepare_cancellation_pipeline(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        pipeline.github,
+        "issue_is_open",
+        lambda *_args: next(checks, False),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "_publish_branch",
+        lambda _config, _worker, _token: published.append("published"),
+    )
+    monkeypatch.setattr(
+        pipeline.github,
+        "create_pr",
+        lambda *_args, **_kwargs: prs.append("created") or "url",
+    )
+
+    def run_worker(
+        _config: Config,
+        _issue: Issue,
+        run_dir: Path,
+        **_kwargs: object,
+    ) -> WorkerResult:
+        return WorkerResult(
+            run_dir=run_dir,
+            branch="fix/pipeline/issue-9-add-reliable-retry-path",
+            handoff=_handoff(),
+            tests_output="passed",
+            bundle_path=run_dir / "result.bundle",
+        )
+
+    monkeypatch.setattr(pipeline, "run_worker", run_worker)
+
+    outcome = pipeline.run_issue(
+        config,
+        _issue(),
+        "token",
+        attempt_timeout_seconds=10,
+    )
+
+    assert outcome.status == "cancelled"
+    assert published == []
+    assert prs == []
+
+
+def test_issue_state_error_does_not_cancel_the_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    store.init_db(config.data_dir / "orch.db")
+    prs: list[str] = []
+    _prepare_cancellation_pipeline(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        pipeline.github,
+        "issue_is_open",
+        lambda *_args: (_ for _ in ()).throw(GitHubError("offline")),
+    )
+    monkeypatch.setattr(pipeline, "_publish_branch", lambda *_args: None)
+    monkeypatch.setattr(
+        pipeline.github,
+        "create_pr",
+        lambda *_args, **_kwargs: prs.append("created") or "https://example.test/pr/9",
+    )
+
+    def run_worker(
+        _config: Config,
+        _issue: Issue,
+        run_dir: Path,
+        **_kwargs: object,
+    ) -> WorkerResult:
+        return WorkerResult(
+            run_dir=run_dir,
+            branch="fix/pipeline/issue-9-add-reliable-retry-path",
+            handoff=_handoff(),
+            tests_output="passed",
+            bundle_path=run_dir / "result.bundle",
+        )
+
+    monkeypatch.setattr(pipeline, "run_worker", run_worker)
+
+    outcome = pipeline.run_issue(
+        config,
+        _issue(),
+        "token",
+        attempt_timeout_seconds=10,
+    )
+
+    assert outcome.status == "pr_open"
+    assert prs == ["created"]

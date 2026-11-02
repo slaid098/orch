@@ -16,3 +16,5 @@ class RunOutcome:
     branch: str
     pr_url: str | None = None
     error: str | None = None
+    issue_title: str = ""
+    duration_seconds: int = 0

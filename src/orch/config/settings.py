@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 from typing import Any
@@ -11,7 +12,15 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from orch.config.logger import get_logger
 from orch.exceptions.config import ConfigError
-from orch.schemas.config.types import Config, LabelsConfig, RepoConfig, WorkerConfig
+from orch.schemas.config.types import (
+    Config,
+    FeedbackConfig,
+    LabelsConfig,
+    RepoConfig,
+    TelegramConfig,
+    WatchdogConfig,
+    WorkerConfig,
+)
 
 log = get_logger(component="config")
 
@@ -64,6 +73,9 @@ def _parse_config(
     repo = _parse_repo(raw, base_dir)
     labels = _parse_labels(raw)
     worker = _parse_worker(raw)
+    telegram = _parse_telegram(raw, base_dir)
+    feedback = _parse_feedback(raw, repo)
+    watchdog = _parse_watchdog(raw)
     data_dir = _resolve_path(str(raw.get("data_dir") or _default_data_dir()), base_dir)
     poll_interval_seconds = _positive_int(
         raw.get("poll_interval_seconds", 30), "poll_interval_seconds"
@@ -83,6 +95,9 @@ def _parse_config(
         max_workers=max_workers,
         retention_days=retention_days,
         gh_token=_resolve_token(settings),
+        telegram=telegram,
+        feedback=feedback,
+        watchdog=watchdog,
     )
 
 
@@ -165,10 +180,182 @@ def _parse_autocompact(worker_raw: dict[str, Any]) -> str:
     return f"{tokens // 1000}k" if tokens % 1000 == 0 else str(tokens)
 
 
-def _resolve_token(settings: _RuntimeSettings) -> str | None:
-    token = settings.gh_token or os.environ.get("GH_TOKEN") or os.environ.get(
-        "GITHUB_TOKEN"
+def _parse_telegram(raw: dict[str, Any], base_dir: Path) -> TelegramConfig:
+    telegram_raw = _mapping(raw.get("telegram", {}), "telegram")
+    enabled = _bool(telegram_raw.get("enabled", False), "telegram.enabled")
+    chat_id_value = telegram_raw.get("chat_id", "")
+    if isinstance(chat_id_value, int) and not isinstance(chat_id_value, bool):
+        chat_id_value = str(chat_id_value)
+    chat_id = chat_id_value.strip() if isinstance(chat_id_value, str) else ""
+    thread_value = telegram_raw.get("message_thread_id")
+    thread_id = (
+        None
+        if thread_value is None
+        else _positive_int(thread_value, "telegram.message_thread_id")
     )
+    token_file_value = telegram_raw.get("token_file")
+    token_file = (
+        _resolve_path(str(token_file_value), base_dir)
+        if isinstance(token_file_value, str) and token_file_value.strip()
+        else None
+    )
+    token = _resolve_telegram_token(token_file)
+    if enabled and not chat_id:
+        raise ConfigError("telegram.chat_id is required when telegram is enabled")
+    if enabled and not token:
+        raise ConfigError(
+            "telegram is enabled but no bot token was found; "
+            "set TELEGRAM_BOT_TOKEN or telegram.token_file"
+        )
+    return TelegramConfig(
+        enabled=enabled,
+        chat_id=chat_id,
+        message_thread_id=thread_id,
+        token=token,
+        api_base=_optional_str(
+            telegram_raw, "api_base", "https://api.telegram.org"
+        ),
+    )
+
+
+def _parse_feedback(raw: dict[str, Any], repo: RepoConfig) -> FeedbackConfig:
+    feedback_raw = _mapping(raw.get("feedback", {}), "feedback")
+    allowed = _str_tuple(
+        feedback_raw.get("allowed_users", []), "feedback.allowed_users"
+    )
+    return FeedbackConfig(
+        enabled=_bool(feedback_raw.get("enabled", True), "feedback.enabled"),
+        live_comments=_bool(
+            feedback_raw.get("live_comments", False), "feedback.live_comments"
+        ),
+        poll_seconds=_bounded_int(
+            feedback_raw.get("poll_seconds", 30),
+            "feedback.poll_seconds",
+            minimum=1,
+            maximum=600,
+        ),
+        allowed_users=allowed or (repo.owner,),
+    )
+
+
+def _parse_watchdog(raw: dict[str, Any]) -> WatchdogConfig:
+    watchdog_raw = _mapping(raw.get("watchdog", {}), "watchdog")
+    enabled = _bool(watchdog_raw.get("enabled", False), "watchdog.enabled")
+    api_key = _resolve_ollama_key()
+    if enabled and not api_key:
+        raise ConfigError(
+            "watchdog is enabled but no Ollama Cloud key was found; "
+            "set OLLAMA_API_KEY"
+        )
+    return WatchdogConfig(
+        enabled=enabled,
+        endpoint=_optional_str(
+            watchdog_raw, "endpoint", "https://ollama.com/v1/systemone"
+        ),
+        model=_optional_str(watchdog_raw, "model", "clef"),
+        api_key=api_key,
+        confidence_threshold=_bounded_float(
+            watchdog_raw.get("confidence_threshold", 0.7),
+            "watchdog.confidence_threshold",
+            minimum=0.0,
+            maximum=1.0,
+        ),
+        silence_minutes=_bounded_int(
+            watchdog_raw.get("silence_minutes", 10),
+            "watchdog.silence_minutes",
+            minimum=1,
+            maximum=120,
+        ),
+        min_run_minutes=_bounded_int(
+            watchdog_raw.get("min_run_minutes", 15),
+            "watchdog.min_run_minutes",
+            minimum=0,
+            maximum=90,
+        ),
+        max_nudges=_bounded_int(
+            watchdog_raw.get("max_nudges", 2),
+            "watchdog.max_nudges",
+            minimum=0,
+            maximum=5,
+        ),
+        cooldown_minutes=_bounded_int(
+            watchdog_raw.get("cooldown_minutes", 10),
+            "watchdog.cooldown_minutes",
+            minimum=1,
+            maximum=120,
+        ),
+        check_seconds=_bounded_int(
+            watchdog_raw.get("check_seconds", 60),
+            "watchdog.check_seconds",
+            minimum=10,
+            maximum=3600,
+        ),
+        max_context_chars=_bounded_int(
+            watchdog_raw.get("max_context_chars", 6000),
+            "watchdog.max_context_chars",
+            minimum=1000,
+            maximum=20000,
+        ),
+    )
+
+
+def _resolve_telegram_token(token_file: Path | None) -> str | None:
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    if token:
+        return token
+    if token_file is None:
+        return None
+    try:
+        lines = token_file.read_text(encoding="utf-8").splitlines()
+    except OSError as ex:
+        log.bind(
+            path=str(token_file),
+            error=ex,
+            error_type=type(ex).__name__,
+        ).warning("Could not read Telegram token file")
+        return None
+    for line in lines:
+        key, separator, value = line.strip().partition("=")
+        if separator and key.strip() == "TELEGRAM_BOT_TOKEN":
+            token = value.strip().strip("'\"")
+            return token or None
+    return None
+
+
+def _resolve_ollama_key() -> str | None:
+    token = os.environ.get("OLLAMA_API_KEY", "").strip()
+    if token:
+        return token
+    path = Path.home() / ".local" / "share" / "opencode" / "auth.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    value = (data.get("ollama-cloud") or {}).get("key")
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _bool(value: Any, name: str) -> bool:
+    if not isinstance(value, bool):
+        raise ConfigError(f"{name} must be a boolean")
+    return value
+
+
+def _bounded_float(
+    value: Any, name: str, *, minimum: float, maximum: float
+) -> float:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise ConfigError(f"{name} must be a number")
+    number = float(value)
+    if not minimum <= number <= maximum:
+        raise ConfigError(f"{name} must be between {minimum} and {maximum}")
+    return number
+
+
+def _resolve_token(settings: _RuntimeSettings) -> str | None:
+    # Ignore ambient GITHUB_TOKEN: on a developer machine it often belongs to
+    # another account. The explicit GH_TOKEN or gh keyring wins.
+    token = settings.gh_token or os.environ.get("GH_TOKEN")
     return token.strip() if token else None
 
 

@@ -5,11 +5,12 @@ from orch.services.github.service import (
     create_pr,
     delete_branch,
     edit_labels,
-    ensure_labels,
-    ensure_user,
     find_open_pr,
     get_issue,
+    issue_is_open,
+    list_issue_comments,
     list_ready_issues,
+    mark_bot_body,
     resolve_token,
 )
 
@@ -18,10 +19,11 @@ __all__ = [
     "create_pr",
     "delete_branch",
     "edit_labels",
-    "ensure_labels",
-    "ensure_user",
     "find_open_pr",
     "get_issue",
+    "issue_is_open",
+    "list_issue_comments",
     "list_ready_issues",
+    "mark_bot_body",
     "resolve_token",
 ]

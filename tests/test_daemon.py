@@ -80,12 +80,12 @@ def test_initialize_resolves_token_and_labels(
     calls: list[object] = []
     monkeypatch.setattr(daemon.github, "resolve_token", lambda owner, token: "token")
     monkeypatch.setattr(
-        daemon.github,
+        daemon,
         "ensure_user",
         lambda token, owner: calls.append(("user", token, owner)),
     )
     monkeypatch.setattr(
-        daemon.github,
+        daemon,
         "ensure_labels",
         lambda repo, token, labels: calls.append(("labels", repo, labels)),
     )
@@ -386,3 +386,133 @@ def test_reconcile_startup_continues_after_one_failure(
     monkeypatch.setattr(daemon.github, "comment_issue", fail)
 
     daemon._reconcile_startup(config, "token")
+
+
+def test_run_daemon_sends_accepted_notification(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    accepted: list[tuple[int, int, int]] = []
+    monkeypatch.setattr(daemon, "_reconcile_startup", lambda *_args: None)
+    monkeypatch.setattr(daemon.github, "list_ready_issues", lambda *_args: [_issue(7), _issue(8)])
+    monkeypatch.setattr(daemon.store, "has_active_run", lambda *_args: False)
+    monkeypatch.setattr(daemon, "_claim_issue", lambda *_args: True)
+    monkeypatch.setattr(daemon, "ThreadPoolExecutor", FakeExecutor)
+    monkeypatch.setattr(
+        daemon.notify,
+        "notify_accepted",
+        lambda _config, number, _title, *, queue, active: accepted.append(
+            (number, queue, active)
+        ),
+    )
+
+    def interrupt(_seconds: int) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(daemon.time, "sleep", interrupt)
+
+    assert daemon.run_daemon(config, "token") == 0
+    assert accepted == [(7, 1, 1)]
+
+
+def test_reap_finished_sends_pr_and_needs_human_notifications(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    pr_outcome = RunOutcome(
+        run_id="run-1",
+        status="pr_open",
+        run_dir=Path("run-1"),
+        branch="feat/cli/issue-7-add-version-flag",
+        pr_url="https://example.test/pr/7",
+        issue_title="feat(cli): add version flag",
+        duration_seconds=90,
+    )
+    human_outcome = RunOutcome(
+        run_id="run-2",
+        status="needs_human",
+        run_dir=Path("run-2"),
+        branch="fix/cli/issue-8-broken",
+        error="tests failed",
+        issue_title="fix(cli): broken",
+        duration_seconds=120,
+    )
+    active = {
+        7: FakeFuture(done=True, result=pr_outcome),
+        8: FakeFuture(done=True, result=human_outcome),
+    }
+    finished: list[tuple[int, int, int, int]] = []
+    human: list[tuple[int, str, int, int]] = []
+    monkeypatch.setattr(daemon, "_queue_size", lambda *_args: 3)
+    monkeypatch.setattr(daemon, "prune_runs", lambda *_args: None)
+    monkeypatch.setattr(
+        daemon.notify,
+        "notify_finished",
+        lambda _config, number, _title, *, pr_url, duration_seconds, queue, active: (
+            finished.append((number, duration_seconds, queue, active))
+        ),
+    )
+    monkeypatch.setattr(
+        daemon.notify,
+        "notify_needs_human",
+        lambda _config, number, _title, *, reason, queue, active: human.append(
+            (number, reason, queue, active)
+        ),
+    )
+
+    daemon._reap_finished(active, config, "token")
+
+    assert finished == [(7, 90, 3, 1)]
+    assert human == [(8, "tests failed", 3, 0)]
+    assert active == {}
+
+
+def test_run_once_sends_lifecycle_notifications(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    accepted: list[int] = []
+    finished: list[str] = []
+    monkeypatch.setattr(daemon.github, "get_issue", lambda *_args: _issue())
+    monkeypatch.setattr(daemon, "run_issue", lambda *_args: _outcome())
+    monkeypatch.setattr(
+        daemon.notify,
+        "notify_accepted",
+        lambda _config, number, _title, *, queue, active: accepted.append(number),
+    )
+    monkeypatch.setattr(
+        daemon.notify,
+        "notify_finished",
+        lambda _config, number, _title, *, pr_url, **kwargs: finished.append(pr_url),
+    )
+
+    assert daemon.run_once(config, "token", 7) == 0
+    assert accepted == [7]
+    assert finished == ["https://example.test/pr/1"]
+
+
+def test_run_once_refuses_closed_issue(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    closed = Issue(
+        number=7,
+        title="feat(cli): add version flag",
+        body="Body",
+        url="https://example.test/7",
+        author="slaid098",
+        labels=("agent:queued",),
+        state="CLOSED",
+    )
+    monkeypatch.setattr(daemon.github, "get_issue", lambda *_args: closed)
+    monkeypatch.setattr(
+        daemon,
+        "run_issue",
+        lambda *_args: pytest.fail("closed issue must not run"),
+    )
+
+    assert daemon.run_once(config, "token", 7) == 1

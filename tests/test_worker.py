@@ -6,10 +6,18 @@ from pathlib import Path
 
 import pytest
 
-from orch.exceptions.worker import AgentError
-from orch.schemas.config.types import Config, LabelsConfig, RepoConfig, WorkerConfig
+from orch.exceptions.worker import AgentError, RunCancelled, WatchdogStop
+from orch.schemas.config.types import (
+    Config,
+    FeedbackConfig,
+    LabelsConfig,
+    RepoConfig,
+    WatchdogConfig,
+    WorkerConfig,
+)
 from orch.schemas.github.types import Issue
 from orch.schemas.standards.types import Handoff
+from orch.schemas.worker.types import WorkerResult
 from orch.services.worker import service as worker
 
 
@@ -27,6 +35,24 @@ def _config(tmp_path: Path, *, attempt: int = 1) -> Config:
             test_commands=("pytest",),
         ),
         data_dir=tmp_path / "data",
+    )
+
+
+def _stream_config(tmp_path: Path, *, watchdog: bool = False) -> Config:
+    return Config(
+        repo=RepoConfig(owner="slaid098", name="orch", path=tmp_path),
+        labels=LabelsConfig(),
+        worker=WorkerConfig(
+            image="image:latest",
+            model="model",
+            timeout_minutes=1,
+            max_attempts=2,
+            setup_commands=("uv sync",),
+            test_commands=("pytest",),
+        ),
+        data_dir=tmp_path / "data",
+        feedback=FeedbackConfig(live_comments=True),
+        watchdog=WatchdogConfig(enabled=watchdog, api_key="key"),
     )
 
 
@@ -435,3 +461,189 @@ def test_container_name_is_safe() -> None:
     name = worker._container_name(Path("Issue 7") / "attempt 1")
 
     assert name == "orch-issue-7-attempt-1"
+
+
+def _stream_exec(run_dir: Path):
+    def fake_exec(
+        _name: str,
+        command: str,
+        *,
+        timeout: int,
+        stdout_path: Path | None = None,
+        stderr_path: Path | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        del timeout
+        if "printf" in command:
+            return _proc("base123\n")
+        if "git status --porcelain" in command:
+            return _proc(" M file.py\n")
+        if "git rev-list" in command:
+            return _proc("0\n")
+        if "git log -1" in command:
+            return _proc("feat(cli): add version flag\n")
+        if "git bundle create" in command:
+            (run_dir / "result.bundle").write_text("bundle", encoding="utf-8")
+        if stdout_path is not None:
+            stdout_path.write_text("", encoding="utf-8")
+        if stderr_path is not None:
+            stderr_path.write_text("", encoding="utf-8")
+        return _proc()
+
+    return fake_exec
+
+
+def _run_stream_worker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    session_result: object,
+    feedback: object | None = None,
+    watchdog: bool = False,
+) -> WorkerResult:
+    config = _stream_config(tmp_path, watchdog=watchdog)
+    run_dir = tmp_path / "runs" / "issue-7"
+    source = tmp_path / "source"
+    source.mkdir()
+    monkeypatch.setattr(worker, "start_worker", lambda **_kwargs: "container")
+    monkeypatch.setattr(worker, "stop", lambda _name: None)
+    monkeypatch.setattr(worker, "load_handoff", lambda _run_dir: _handoff())
+    monkeypatch.setattr(worker, "exec_in", _stream_exec(run_dir))
+    monkeypatch.setattr(
+        worker.session,
+        "run_session",
+        lambda *_args, **_kwargs: session_result,
+    )
+    return worker.run_worker(
+        config,
+        _issue(),
+        run_dir,
+        source_path=source,
+        workspace_path=tmp_path / "workspace",
+        timeout_seconds=60,
+        feedback=feedback,  # type: ignore[arg-type]
+    )
+
+
+def test_run_worker_uses_stream_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+    feedback = object()
+
+    def run_session(*args: object, **kwargs: object) -> object:
+        captured["args"] = args
+        captured["feedback"] = kwargs.get("feedback")
+        return type(
+            "Result",
+            (),
+            {
+                "returncode": 0,
+                "timed_out": False,
+                "cancelled": False,
+                "cancel_reason": None,
+                "stopped_by_watchdog": False,
+                "watchdog_reason": None,
+            },
+        )()
+
+    config = _stream_config(tmp_path)
+    run_dir = tmp_path / "runs" / "issue-7"
+    source = tmp_path / "source"
+    source.mkdir()
+    monkeypatch.setattr(worker, "start_worker", lambda **_kwargs: "container")
+    monkeypatch.setattr(worker, "stop", lambda _name: None)
+    monkeypatch.setattr(worker, "load_handoff", lambda _run_dir: _handoff())
+    monkeypatch.setattr(worker, "exec_in", _stream_exec(run_dir))
+    monkeypatch.setattr(worker.session, "run_session", run_session)
+
+    result = worker.run_worker(
+        config,
+        _issue(),
+        run_dir,
+        source_path=source,
+        workspace_path=tmp_path / "workspace",
+        timeout_seconds=60,
+        feedback=feedback,  # type: ignore[arg-type]
+    )
+
+    assert result.branch == "feat/cli/issue-7-add-version-flag"
+    assert captured["feedback"] is feedback
+    args = captured["args"]
+    assert isinstance(args, tuple)
+    assert "feat(cli): add version flag" in str(args[3])
+
+
+def test_run_worker_propagates_stream_cancellation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result = type(
+        "Result",
+        (),
+        {
+            "returncode": 0,
+            "timed_out": False,
+            "cancelled": True,
+            "cancel_reason": "issue closed",
+            "stopped_by_watchdog": False,
+            "watchdog_reason": None,
+        },
+    )()
+
+    with pytest.raises(RunCancelled, match="issue closed"):
+        _run_stream_worker(
+            tmp_path,
+            monkeypatch,
+            session_result=result,
+        )
+
+
+def test_run_worker_propagates_watchdog_stop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result = type(
+        "Result",
+        (),
+        {
+            "returncode": 0,
+            "timed_out": False,
+            "cancelled": False,
+            "cancel_reason": None,
+            "stopped_by_watchdog": True,
+            "watchdog_reason": "loop confirmed",
+        },
+    )()
+
+    with pytest.raises(WatchdogStop, match="loop confirmed"):
+        _run_stream_worker(
+            tmp_path,
+            monkeypatch,
+            session_result=result,
+        )
+
+
+def test_run_worker_rejects_stream_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result = type(
+        "Result",
+        (),
+        {
+            "returncode": 0,
+            "timed_out": True,
+            "cancelled": False,
+            "cancel_reason": None,
+            "stopped_by_watchdog": False,
+            "watchdog_reason": None,
+        },
+    )()
+
+    with pytest.raises(AgentError, match="timed out"):
+        _run_stream_worker(
+            tmp_path,
+            monkeypatch,
+            session_result=result,
+        )

@@ -395,3 +395,89 @@ def test_run_gh_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
 
     with pytest.raises(github.GitHubError, match="timed out"):
         github._run_gh(["api", "user"], "secret", timeout=1)
+
+
+def test_list_issue_comments_parses_and_encodes_since(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+    payload = [
+        {
+            "id": 10,
+            "user": {"login": "slaid098"},
+            "body": "Hello",
+            "created_at": "2026-11-02T10:00:00Z",
+            "html_url": "https://example.test/comment/10",
+        }
+    ]
+    monkeypatch.setattr(
+        github,
+        "_run_gh",
+        lambda args, _token: calls.append(args) or json.dumps(payload),
+    )
+
+    comments = github.list_issue_comments(
+        "slaid098/orch",
+        7,
+        "token",
+        since="2026-11-02T09:00:00Z",
+    )
+
+    assert comments[0].id == 10
+    assert comments[0].author == "slaid098"
+    assert comments[0].body == "Hello"
+    assert "since=2026-11-02T09%3A00%3A00Z" in calls[0][1]
+
+
+def test_list_issue_comments_rejects_invalid_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(github, "_run_gh", lambda *_args, **_kwargs: "{")
+
+    with pytest.raises(github.GitHubError, match="comments"):
+        github.list_issue_comments("slaid098/orch", 7, "token")
+
+
+def test_issue_is_open_parses_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(github, "_run_gh", lambda *_args, **_kwargs: '{"state":"OPEN"}')
+    assert github.issue_is_open("slaid098/orch", 7, "token")
+
+    monkeypatch.setattr(github, "_run_gh", lambda *_args, **_kwargs: '{"state":"CLOSED"}')
+    assert not github.issue_is_open("slaid098/orch", 7, "token")
+
+
+def test_issue_is_open_rejects_invalid_json(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(github, "_run_gh", lambda *_args, **_kwargs: "{")
+
+    with pytest.raises(github.GitHubError, match="state"):
+        github.issue_is_open("slaid098/orch", 7, "token")
+
+
+def test_comment_bot_issue_marks_the_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    bodies: list[str] = []
+    monkeypatch.setattr(
+        github,
+        "comment_issue",
+        lambda _repo, _number, _token, body: bodies.append(body),
+    )
+
+    github.comment_bot_issue("slaid098/orch", 7, "token", "hello")
+
+    assert bodies == [f"hello\n\n{github.BOT_MARKER}"]
+    assert github.mark_bot_body("x").endswith(github.BOT_MARKER)
+
+
+def test_issue_from_json_reads_state() -> None:
+    issue = github.Issue.from_json(
+        {
+            "number": 7,
+            "title": "feat(cli): add flag",
+            "body": "Body",
+            "url": "https://example.test/7",
+            "author": {"login": "slaid098"},
+            "labels": [],
+            "state": "closed",
+        }
+    )
+
+    assert issue.state == "CLOSED"
