@@ -300,11 +300,14 @@ def _parse_watchdog(raw: dict[str, Any]) -> WatchdogConfig:
 
 
 def _resolve_telegram_token(token_file: Path | None) -> str | None:
-    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
-    if token:
-        return token
-    if token_file is None:
-        return None
+    if token_file is not None:
+        token = _read_telegram_token_file(token_file)
+        if token:
+            return token
+    return os.environ.get("TELEGRAM_BOT_TOKEN", "").strip() or None
+
+
+def _read_telegram_token_file(token_file: Path) -> str | None:
     try:
         lines = token_file.read_text(encoding="utf-8").splitlines()
     except OSError as ex:

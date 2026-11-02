@@ -51,9 +51,10 @@ issue: `Orch принято`, `Orch завершено` with the PR URL and dura
 counts. The bot only sends messages; it does not read commands, buttons, or
 chat updates. A Telegram failure is logged and never interrupts the pipeline.
 
-The bot token comes from `TELEGRAM_BOT_TOKEN` or `telegram.token_file`. For a
-forum, set `telegram.chat_id` to the supergroup and `telegram.message_thread_id`
-to the single `Orch` topic. Keep the token out of `orch.yaml`.
+The bot token comes from `telegram.token_file` when configured, otherwise from
+`TELEGRAM_BOT_TOKEN`. For a forum, set `telegram.chat_id` to the supergroup and
+`telegram.message_thread_id` to the single `Orch` topic. Keep the token out of
+`orch.yaml`.
 
 ## Watchdog
 
