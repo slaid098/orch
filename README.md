@@ -177,7 +177,9 @@ If the default Debian mirror is slow from your network, pass a different one wit
 The image is self-contained: Node 26, CodeGraph 1.6.2, Playwright and Chromium,
 ripgrep, jq, ffmpeg, and build tools are baked in. Playwright uses the Debian
 Chromium at `/usr/bin/chromium`; the build does not download Playwright's
-separate browser bundle. Claude Code receives a per-container `mcp.json`;
+separate browser bundle. Python Playwright calls must pass
+`executable_path="/usr/bin/chromium"`; the generated MCP config already does.
+Claude Code receives a per-container `mcp.json`;
 CodeGraph and Context7 are available to both roles, while Playwright and
 antidetect-browser stay worker-only.
 
