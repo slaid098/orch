@@ -37,6 +37,16 @@ def test_build_command_pins_window_and_model(tmp_path: Path) -> None:
     assert "--output-format stream-json" in command
 
 
+def test_build_command_adds_mcp_flags_and_tools(tmp_path: Path) -> None:
+    command = claude.build_command(_config(tmp_path), "/out/mcp.json")
+
+    assert '--mcp-config "/out/mcp.json" --strict-mcp-config' in command
+    assert "mcp__codegraph__codegraph_explore" in command
+    assert "mcp__context7__query-docs" in command
+    assert "mcp__playwright__*" in command
+    assert "mcp__antidetect-browser__*" in command
+
+
 def test_build_settings_pins_every_layer(tmp_path: Path) -> None:
     settings = claude.build_settings(_config(tmp_path))
 

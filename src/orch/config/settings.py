@@ -17,6 +17,7 @@ from orch.schemas.config.types import (
     Config,
     FeedbackConfig,
     LabelsConfig,
+    McpConfig,
     RepoConfig,
     ReviewerConfig,
     TelegramConfig,
@@ -52,14 +53,14 @@ def load_config(path: Path | None = None) -> Config:
     try:
         raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     except FileNotFoundError as ex:
-        log.bind(
-            path=str(config_path), error=ex, error_type=type(ex).__name__
-        ).error("Configuration file not found")
+        log.bind(path=str(config_path), error=ex, error_type=type(ex).__name__).error(
+            "Configuration file not found"
+        )
         raise ConfigError(f"Configuration file not found: {config_path}") from ex
     except (OSError, yaml.YAMLError) as ex:
-        log.bind(
-            path=str(config_path), error=ex, error_type=type(ex).__name__
-        ).error("Could not read configuration file")
+        log.bind(path=str(config_path), error=ex, error_type=type(ex).__name__).error(
+            "Could not read configuration file"
+        )
         raise ConfigError(f"Could not read configuration file: {config_path}") from ex
     else:
         if not isinstance(raw, dict):
@@ -80,13 +81,12 @@ def _parse_config(
     watchdog = _parse_watchdog(raw)
     checks = _parse_checks(raw)
     reviewer = _parse_reviewer(raw)
+    mcp = _parse_mcp(raw)
     data_dir = _resolve_path(str(raw.get("data_dir") or _default_data_dir()), base_dir)
     poll_interval_seconds = _positive_int(
         raw.get("poll_interval_seconds", 30), "poll_interval_seconds"
     )
-    max_workers = _bounded_int(
-        raw.get("max_workers", 2), "max_workers", minimum=1, maximum=3
-    )
+    max_workers = _bounded_int(raw.get("max_workers", 2), "max_workers", minimum=1, maximum=3)
     retention_days = _bounded_int(
         raw.get("retention_days", 7), "retention_days", minimum=1, maximum=365
     )
@@ -104,6 +104,7 @@ def _parse_config(
         watchdog=watchdog,
         checks=checks,
         reviewer=reviewer,
+        mcp=mcp,
     )
 
 
@@ -135,17 +136,14 @@ def _parse_labels(raw: dict[str, Any]) -> LabelsConfig:
         running=_optional_str(labels_raw, "running", "agent:running"),
         needs_human=_optional_str(labels_raw, "needs_human", "agent:needs-human"),
         pr_open=_optional_str(labels_raw, "pr_open", "agent:pr-open"),
+        hold=_optional_str(labels_raw, "hold", "agent:hold"),
     )
 
 
 def _parse_worker(raw: dict[str, Any]) -> WorkerConfig:
     worker_raw = _mapping(raw.get("worker"), "worker")
-    setup_commands = _str_tuple(
-        worker_raw.get("setup_commands", []), "worker.setup_commands"
-    )
-    test_commands = _str_tuple(
-        worker_raw.get("test_commands", []), "worker.test_commands"
-    )
+    setup_commands = _str_tuple(worker_raw.get("setup_commands", []), "worker.setup_commands")
+    test_commands = _str_tuple(worker_raw.get("test_commands", []), "worker.test_commands")
     if not test_commands:
         raise ConfigError("worker.test_commands must contain at least one command")
     return WorkerConfig(
@@ -163,9 +161,7 @@ def _parse_worker(raw: dict[str, Any]) -> WorkerConfig:
             minimum=1,
             maximum=3,
         ),
-        allowed_tools=_optional_str(
-            worker_raw, "allowed_tools", "Read,Write,Edit,Bash,Glob,Grep"
-        ),
+        allowed_tools=_optional_str(worker_raw, "allowed_tools", "Read,Write,Edit,Bash,Glob,Grep"),
         autocompact=_parse_autocompact(worker_raw, "worker.autocompact"),
         setup_commands=setup_commands,
         test_commands=test_commands,
@@ -195,9 +191,7 @@ def _parse_telegram(raw: dict[str, Any], base_dir: Path) -> TelegramConfig:
     chat_id = chat_id_value.strip() if isinstance(chat_id_value, str) else ""
     thread_value = telegram_raw.get("message_thread_id")
     thread_id = (
-        None
-        if thread_value is None
-        else _positive_int(thread_value, "telegram.message_thread_id")
+        None if thread_value is None else _positive_int(thread_value, "telegram.message_thread_id")
     )
     token_file_value = telegram_raw.get("token_file")
     token_file = (
@@ -218,22 +212,16 @@ def _parse_telegram(raw: dict[str, Any], base_dir: Path) -> TelegramConfig:
         chat_id=chat_id,
         message_thread_id=thread_id,
         token=token,
-        api_base=_optional_str(
-            telegram_raw, "api_base", "https://api.telegram.org"
-        ),
+        api_base=_optional_str(telegram_raw, "api_base", "https://api.telegram.org"),
     )
 
 
 def _parse_feedback(raw: dict[str, Any], repo: RepoConfig) -> FeedbackConfig:
     feedback_raw = _mapping(raw.get("feedback", {}), "feedback")
-    allowed = _str_tuple(
-        feedback_raw.get("allowed_users", []), "feedback.allowed_users"
-    )
+    allowed = _str_tuple(feedback_raw.get("allowed_users", []), "feedback.allowed_users")
     return FeedbackConfig(
         enabled=_bool(feedback_raw.get("enabled", True), "feedback.enabled"),
-        live_comments=_bool(
-            feedback_raw.get("live_comments", False), "feedback.live_comments"
-        ),
+        live_comments=_bool(feedback_raw.get("live_comments", False), "feedback.live_comments"),
         poll_seconds=_bounded_int(
             feedback_raw.get("poll_seconds", 30),
             "feedback.poll_seconds",
@@ -250,14 +238,11 @@ def _parse_watchdog(raw: dict[str, Any]) -> WatchdogConfig:
     api_key = _resolve_ollama_key()
     if enabled and not api_key:
         raise ConfigError(
-            "watchdog is enabled but no Ollama Cloud key was found; "
-            "set OLLAMA_API_KEY"
+            "watchdog is enabled but no Ollama Cloud key was found; set OLLAMA_API_KEY"
         )
     return WatchdogConfig(
         enabled=enabled,
-        endpoint=_optional_str(
-            watchdog_raw, "endpoint", "https://ollama.com/v1/systemone"
-        ),
+        endpoint=_optional_str(watchdog_raw, "endpoint", "https://ollama.com/v1/systemone"),
         model=_optional_str(watchdog_raw, "model", "clef"),
         api_key=api_key,
         confidence_threshold=_bounded_float(
@@ -348,9 +333,27 @@ def _parse_reviewer(raw: dict[str, Any]) -> ReviewerConfig:
             maximum=3,
         ),
         autocompact=_parse_autocompact(reviewer_raw, "reviewer.autocompact"),
-        allowed_tools=_optional_str(
-            reviewer_raw, "allowed_tools", "Read,Grep,Glob"
+        allowed_tools=_optional_str(reviewer_raw, "allowed_tools", "Read,Grep,Glob"),
+    )
+
+
+def _parse_mcp(raw: dict[str, Any]) -> McpConfig:
+    mcp_raw = _mapping(raw.get("mcp", {}), "mcp")
+    enabled = _bool(mcp_raw.get("enabled", True), "mcp.enabled")
+    return McpConfig(
+        enabled=enabled,
+        codegraph=_bool(mcp_raw.get("codegraph", True), "mcp.codegraph"),
+        context7=_bool(mcp_raw.get("context7", True), "mcp.context7"),
+        playwright=_bool(mcp_raw.get("playwright", True), "mcp.playwright"),
+        antidetect=_bool(mcp_raw.get("antidetect", True), "mcp.antidetect"),
+        context7_url=_optional_str(mcp_raw, "context7_url", "https://mcp.context7.com/mcp"),
+        antidetect_url=_optional_str(
+            mcp_raw,
+            "antidetect_url",
+            "http://80.85.139.21:8765/mcp/",
         ),
+        codegraph_command=_optional_str(mcp_raw, "codegraph_command", "codegraph"),
+        playwright_command=_optional_str(mcp_raw, "playwright_command", "playwright-mcp"),
     )
 
 
@@ -387,7 +390,7 @@ def _resolve_ollama_key() -> str | None:
     path = Path.home() / ".local" / "share" / "opencode" / "auth.json"
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except OSError, ValueError:
         return None
     value = (data.get("ollama-cloud") or {}).get("key")
     return value.strip() if isinstance(value, str) and value.strip() else None
@@ -399,9 +402,7 @@ def _bool(value: Any, name: str) -> bool:
     return value
 
 
-def _bounded_float(
-    value: Any, name: str, *, minimum: float, maximum: float
-) -> float:
+def _bounded_float(value: Any, name: str, *, minimum: float, maximum: float) -> float:
     if not isinstance(value, (int, float)) or isinstance(value, bool):
         raise ConfigError(f"{name} must be a number")
     number = float(value)

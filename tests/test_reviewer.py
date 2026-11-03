@@ -15,7 +15,13 @@ from orch.schemas.config.types import (
     WorkerConfig,
 )
 from orch.schemas.github.types import Issue
+from orch.schemas.reviewer.types import ReviewFinding, ReviewResult
 from orch.services.reviewer import service as reviewer
+
+
+def test_validate_roles_rejects_an_empty_selection() -> None:
+    with pytest.raises(ReviewerError, match="at least one"):
+        reviewer._validate_roles(())
 
 
 def _config(tmp_path: Path) -> Config:
@@ -128,7 +134,7 @@ def test_parse_review_accepts_all_finding_fields() -> None:
 
 
 def test_parse_review_accepts_fenced_json() -> None:
-    result = reviewer.parse_review("```json\n{\"findings\": []}\n```")
+    result = reviewer.parse_review('```json\n{"findings": []}\n```')
 
     assert result.approved
 
@@ -191,21 +197,28 @@ def test_run_review_approves_and_records_output(
         diff_path=diff_path,
         run_dir=run_dir,
         checks_summary="pytest: success",
+        roles=("quality",),
     )
 
     assert result.approved
     assert starts[0]["repo_path"] == workspace
-    assert starts[0]["run_dir"] == run_dir
+    assert starts[0]["run_dir"] == run_dir / "quality"
     assert starts[0]["image"] == "reviewer:latest"
     assert starts[0]["model"] == "reviewer-model"
     assert starts[0]["context_tokens"] == 200_000
     assert "--permission-mode plan" in commands[0]
-    assert '--allowedTools "Read,Grep,Glob"' in commands[0]
+    assert "Read,Grep,Glob" in commands[0]
+    assert "mcp__codegraph__codegraph_explore" in commands[0]
+    assert "mcp__context7__query-docs" in commands[0]
+    assert "--mcp-config /out/mcp.json --strict-mcp-config" in commands[0]
+    assert (run_dir / "quality" / "mcp.json").exists()
     assert "--json-schema" in commands[0]
     assert "GH_TOKEN" not in commands[0]
     assert len(stops) == 1
     assert stops[0].startswith("orch-review-")
-    assert (run_dir / "review-output-1.json").read_text(encoding="utf-8") == '{"findings": []}'
+    assert (run_dir / "quality" / "review-quality-output-1.json").read_text(
+        encoding="utf-8"
+    ) == '{"findings": []}'
 
 
 def test_run_review_repairs_invalid_json_once(
@@ -217,7 +230,7 @@ def test_run_review_repairs_invalid_json_once(
     prompts: list[str] = []
 
     def start(**kwargs: object) -> str:
-        prompt = (run_dir / "review-prompt.md").read_text(encoding="utf-8")
+        prompt = (run_dir / "quality" / "review-prompt.md").read_text(encoding="utf-8")
         prompts.append(prompt)
         return "container"
 
@@ -225,9 +238,7 @@ def test_run_review_repairs_invalid_json_once(
     monkeypatch.setattr(
         reviewer,
         "exec_in",
-        lambda *_args, **_kwargs: _proc(
-            '{"findings": []}' if len(prompts) == 2 else "not json"
-        ),
+        lambda *_args, **_kwargs: _proc('{"findings": []}' if len(prompts) == 2 else "not json"),
     )
     monkeypatch.setattr(reviewer, "stop", lambda _name: None)
 
@@ -239,14 +250,19 @@ def test_run_review_repairs_invalid_json_once(
         diff_path=diff_path,
         run_dir=run_dir,
         checks_summary="pytest: success",
+        roles=("quality",),
     )
 
     assert result.approved
     assert len(prompts) == 2
     assert "## Repair" not in prompts[0]
     assert "## Repair" in prompts[1]
-    assert (run_dir / "review-output-1.json").read_text(encoding="utf-8") == "not json"
-    assert (run_dir / "review-output-2.json").read_text(encoding="utf-8") == '{"findings": []}'
+    assert (run_dir / "quality" / "review-quality-output-1.json").read_text(
+        encoding="utf-8"
+    ) == "not json"
+    assert (run_dir / "quality" / "review-quality-output-2.json").read_text(
+        encoding="utf-8"
+    ) == '{"findings": []}'
 
 
 def test_run_review_raises_after_two_invalid_outputs(
@@ -269,6 +285,7 @@ def test_run_review_raises_after_two_invalid_outputs(
             diff_path=diff_path,
             run_dir=run_dir,
             checks_summary="pytest: success",
+            roles=("quality",),
         )
 
 
@@ -302,6 +319,7 @@ def test_run_review_retries_a_technical_failure(
         diff_path=diff_path,
         run_dir=run_dir,
         checks_summary="pytest: success",
+        roles=("quality",),
     )
 
     assert result.approved
@@ -329,6 +347,7 @@ def test_run_review_raises_after_two_technical_failures(
             diff_path=diff_path,
             run_dir=run_dir,
             checks_summary="pytest: success",
+            roles=("quality",),
         )
 
 
@@ -356,6 +375,7 @@ def test_run_review_stops_container_when_execution_fails(
             diff_path=diff_path,
             run_dir=run_dir,
             checks_summary="pytest: success",
+            roles=("quality",),
         )
 
     assert len(stops) == 2
@@ -385,6 +405,7 @@ def test_run_review_raises_when_diff_is_missing(
             diff_path=tmp_path / "missing.patch",
             run_dir=run_dir,
             checks_summary="pytest: success",
+            roles=("quality",),
         )
 
 
@@ -400,6 +421,103 @@ def test_run_review_rejects_nonzero_exit(
     )
 
     with pytest.raises(ReviewerError, match="exited with 2"):
+        reviewer.run_review(
+            config,
+            _issue(),
+            pr_url="https://example.test/pull/10",
+            workspace_path=workspace,
+            diff_path=diff_path,
+            run_dir=run_dir,
+            checks_summary="pytest: success",
+            roles=("quality",),
+        )
+
+
+def test_run_review_runs_quality_and_security_by_default(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    run_dir, workspace, diff_path = _prepare_review(tmp_path)
+    seen: list[str] = []
+
+    def fake_role(
+        _config: Config,
+        _issue: Issue,
+        _pr_url: str,
+        _workspace: Path,
+        _prepared: tuple[Path, str, Path | None, int],
+        role: str,
+    ) -> ReviewResult:
+        seen.append(role)
+        return ReviewResult(
+            findings=(
+                ReviewFinding(
+                    file="a.py",
+                    line=1,
+                    title=f"{role} finding",
+                    situation="context",
+                    fixes=(),
+                ),
+            )
+        )
+
+    monkeypatch.setattr(reviewer, "_run_role", fake_role)
+
+    result = reviewer.run_review(
+        config,
+        _issue(),
+        pr_url="https://example.test/pull/10",
+        workspace_path=workspace,
+        diff_path=diff_path,
+        run_dir=run_dir,
+        checks_summary="pytest: success",
+    )
+
+    assert set(seen) == {"quality", "security"}
+    assert {finding.title for finding in result.findings} == {
+        "quality finding",
+        "security finding",
+    }
+    assert (run_dir / "quality" / "review-prompt.md").exists()
+    assert (run_dir / "security" / "review-prompt.md").exists()
+
+
+def test_build_prompt_selects_the_security_role(tmp_path: Path) -> None:
+    prompt = reviewer.build_prompt(
+        _config(tmp_path),
+        _issue(),
+        "diff --git a/a.py b/a.py",
+        "pytest: success",
+        role="security",
+    )
+
+    assert "security-ревьюер" in prompt
+    assert "Reviewer role: `security`" in prompt
+
+
+def test_run_review_fails_closed_when_one_role_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    run_dir, workspace, diff_path = _prepare_review(tmp_path)
+
+    def fake_role(
+        _config: Config,
+        _issue: Issue,
+        _pr_url: str,
+        _workspace: Path,
+        _prepared: tuple[Path, str, Path | None, int],
+        role: str,
+    ) -> ReviewResult:
+        if role == "security":
+            raise ReviewerError("security reviewer exploded")
+        return ReviewResult(findings=())
+
+    monkeypatch.setattr(reviewer, "_run_role", fake_role)
+
+    with pytest.raises(ReviewerError, match="security"):
         reviewer.run_review(
             config,
             _issue(),

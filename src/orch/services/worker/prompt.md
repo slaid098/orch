@@ -4,6 +4,20 @@ Your job is to implement the GitHub issue below in the repository at `/work`.
 The container is disposable, but `/work` is a persistent workspace: a retry
 continues in the same directory instead of starting from a clean clone.
 
+Tools:
+- Call `mcp__codegraph__codegraph_explore` before a manual Grep sweep. If the
+  index is missing or stale, fall back to `Grep` and `Glob`; that is not a
+  failure.
+- Use `mcp__context7__resolve-library-id` and `mcp__context7__query-docs` for
+  up-to-date library documentation. Context7 is optional; continue with local
+  code if it is unavailable.
+- Use the Playwright MCP server or the installed Playwright library for local
+  UI checks when the issue affects a web UI. Save screenshots under `/out`.
+  The library must use `executable_path="/usr/bin/chromium"`; add
+  `--no-sandbox` if Chromium reports a sandbox error.
+- Use `antidetect-browser` only for an explicitly requested live check with an
+  allowlisted profile. Never use it for destructive actions or unrelated sites.
+
 Rules:
 - Work only in `/work` and `/out`.
 - `/src` is read-only. Do not modify it.

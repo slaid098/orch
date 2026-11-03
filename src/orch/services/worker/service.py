@@ -14,6 +14,7 @@ from orch.exceptions.worker import AgentError, RunCancelled, WatchdogStop
 from orch.schemas.config.types import Config
 from orch.schemas.github.types import Issue
 from orch.schemas.worker.types import WorkerResult
+from orch.services import mcp
 from orch.services.docker import exec_in, start_worker, stop
 from orch.services.feedback.service import CommentFeed
 from orch.services.standards import branch_name, load_handoff
@@ -22,8 +23,7 @@ from orch.services.watchdog.service import Watchdog
 log = get_logger(component="worker")
 
 _GIT_ENV = (
-    "export GIT_CONFIG_GLOBAL=/out/gitconfig; "
-    "git config --global --add safe.directory /work; "
+    "export GIT_CONFIG_GLOBAL=/out/gitconfig; git config --global --add safe.directory /work; "
 )
 
 
@@ -130,6 +130,7 @@ def run_worker(
         initial_context=initial_context,
     )
     (run_dir / "prompt.md").write_text(prompt, encoding="utf-8")
+    mcp_path = mcp.write_worker_config(config, run_dir / "mcp.json")
 
     container = _container_name(run_dir)
     deadline = time.monotonic() + timeout_seconds
@@ -157,6 +158,7 @@ def run_worker(
             prompt,
             feedback=feedback,
             workspace_path=workspace_path,
+            mcp_config=mcp_path,
         )
     except Exception:
         if base_sha is not None:
@@ -175,6 +177,7 @@ def _prepare_attempt(
     _write_settings(container, config, deadline)
     base_sha = _prepare_workspace(container, branch, deadline)
     _run_setup(container, config, deadline)
+    _prepare_codegraph(container, config, deadline)
     return base_sha
 
 
@@ -190,6 +193,7 @@ def _complete_attempt(
     *,
     feedback: CommentFeed | None,
     workspace_path: Path,
+    mcp_config: Path | None,
 ) -> WorkerResult:
     _run_agent(
         container,
@@ -200,11 +204,13 @@ def _complete_attempt(
         prompt,
         feedback=feedback,
         workspace_path=workspace_path,
+        mcp_config=mcp_config,
     )
     _ensure_changes(container, base_sha, deadline)
     handoff = load_handoff(run_dir)
     _finalize_commit(container, base_sha, issue.title, run_dir, deadline)
     _write_diff(container, base_sha, run_dir, deadline)
+    _prepare_codegraph(container, config, deadline)
     tests_output = _run_tests(container, config, run_dir, deadline)
     bundle = _bundle(container, branch, run_dir, deadline)
     return WorkerResult(
@@ -226,6 +232,7 @@ def _run_agent(
     *,
     feedback: CommentFeed | None,
     workspace_path: Path,
+    mcp_config: Path | None,
 ) -> None:
     if config.feedback.live_comments or config.watchdog.enabled:
         watchdog = (
@@ -246,9 +253,10 @@ def _run_agent(
             prompt,
             feedback=feedback,
             watchdog=watchdog,
+            mcp_config=mcp_config,
         )
     else:
-        _run_claude(container, config, run_dir, deadline)
+        _run_claude(container, config, run_dir, deadline, mcp_config)
 
 
 def _write_settings(
@@ -358,6 +366,45 @@ def _run_setup(container: str, config: Config, deadline: float) -> None:
     )
 
 
+def _prepare_codegraph(
+    container: str,
+    config: Config,
+    deadline: float,
+) -> None:
+    """Build or refresh the CodeGraph index without failing the attempt."""
+    if not config.mcp.enabled or not config.mcp.codegraph:
+        return
+    command = (
+        "cd /work; "
+        "{ if [ -d .codegraph ]; then codegraph sync .; "
+        "else codegraph init --yes .; fi; } "
+        ">> /out/codegraph.log 2>&1; status=$?; "
+        "mkdir -p .git/info && "
+        "grep -qxF '.codegraph/' .git/info/exclude 2>/dev/null || "
+        "echo '.codegraph/' >> .git/info/exclude; "
+        "exit $status"
+    )
+    try:
+        result = exec_in(
+            container,
+            command,
+            timeout=_remaining(deadline, cap=600),
+        )
+    except Exception as ex:
+        log.bind(
+            container=container,
+            error=ex,
+            error_type=type(ex).__name__,
+        ).warning("CodeGraph indexing failed; the worker will fall back to Grep")
+        return
+    if result.returncode != 0:
+        log.bind(container=container, returncode=result.returncode).warning(
+            "CodeGraph indexing failed; the worker will fall back to Grep"
+        )
+    else:
+        log.info("CodeGraph index is ready at /work/.codegraph")
+
+
 def _run_claude_session(
     container: str,
     config: Config,
@@ -367,6 +414,7 @@ def _run_claude_session(
     *,
     feedback: CommentFeed | None,
     watchdog: Watchdog | None,
+    mcp_config: Path | None,
 ) -> None:
     """Run Claude Code with stream-json input and optional live injection."""
     result = session.run_session(
@@ -378,6 +426,7 @@ def _run_claude_session(
         feedback=feedback,
         watchdog=watchdog,
         completion_path=run_dir / "handoff.json",
+        mcp_config=mcp_config,
     )
     if result.cancelled:
         raise RunCancelled(result.cancel_reason or "issue closed")
@@ -398,8 +447,10 @@ def _run_claude(
     config: Config,
     run_dir: Path,
     deadline: float,
+    mcp_config: Path | None = None,
 ) -> None:
-    command = _GIT_ENV + "cd /work && " + claude.build_command(config)
+    mcp_path = "/out/mcp.json" if mcp_config is not None else None
+    command = _GIT_ENV + "cd /work && " + claude.build_command(config, mcp_path)
     result = exec_in(
         container,
         command,
@@ -473,20 +524,14 @@ def _write_diff(
     run_dir: Path,
     deadline: float,
 ) -> None:
-    command = _GIT_ENV + (
-        "cd /work && "
-        f"git diff --binary {base_sha}...HEAD "
-        "> /out/diff.patch"
-    )
+    command = _GIT_ENV + (f"cd /work && git diff --binary {base_sha}...HEAD > /out/diff.patch")
     result = exec_in(
         container,
         command,
         timeout=_remaining(deadline, cap=120),
     )
     if result.returncode != 0:
-        log.bind(returncode=result.returncode).warning(
-            "Could not write diff.patch; continuing"
-        )
+        log.bind(returncode=result.returncode).warning("Could not write diff.patch; continuing")
 
 
 def _run_tests(
@@ -505,9 +550,7 @@ def _run_tests(
     tests_path = run_dir / "tests.txt"
     output = tests_path.read_text(encoding="utf-8", errors="replace") if tests_path.exists() else ""
     if result.returncode != 0:
-        log.bind(returncode=result.returncode, tests=output[-2000:]).error(
-            "Worker tests failed"
-        )
+        log.bind(returncode=result.returncode, tests=output[-2000:]).error("Worker tests failed")
         raise AgentError(f"Tests failed. See {tests_path}")
     log.info("Worker tests passed")
     return output
@@ -522,8 +565,7 @@ def _bundle(
     bundle = run_dir / "result.bundle"
     _exec_or_raise(
         container,
-        _GIT_ENV
-        + f"cd /work && git bundle create /out/result.bundle refs/heads/{branch}",
+        _GIT_ENV + f"cd /work && git bundle create /out/result.bundle refs/heads/{branch}",
         timeout=_remaining(deadline, cap=300),
         label="bundle",
     )

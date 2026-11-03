@@ -5,8 +5,9 @@ Minimal GitHub issue to pull request orchestrator for containerized coding agent
 `orch` watches GitHub issues labelled `agent:queued`, runs a worker container
 with Claude Code, validates a deterministic commit, runs the repository tests,
 pushes the branch, and opens a pull request. It then waits for GitHub checks,
-runs a separate read-only reviewer container, and squash-merges the pull request
-into `main` only when every check is green and the reviewer returns no findings.
+runs two separate read-only reviewer containers (quality and security), and
+squash-merges the pull request into `main` only when every check is green and
+both reviewers return no findings.
 
 ## What it does
 
@@ -22,16 +23,18 @@ GitHub issue with agent:queued
   -> orch pushes type/scope/issue-N-description
   -> orch opens a standardized pull request
   -> orch waits for GitHub checks
-  -> failed checks return control to the worker, never to the reviewer
-  -> a separate read-only reviewer returns an empty findings array or blocks
+  -> failed checks return control to the worker, never to the reviewers
+  -> quality and security reviewers run in parallel in isolated containers
+  -> both must return an empty findings array; any finding blocks
   -> any finding consumes one shared worker attempt and goes back to the worker
-  -> an empty findings array triggers a squash merge into main
+  -> two empty findings arrays trigger a squash merge into main
   -> three total worker attempts or three review rounds exhaust to needs-human
 ```
 
-The worker has no GitHub token. It cannot push or create pull requests. The
-reviewer has no GitHub token and only the `Read`, `Grep`, and `Glob` tools. Only
-the orchestrator process writes, comments, and merges.
+The worker has no GitHub token. It cannot push or create pull requests. Both
+reviewers have no GitHub token and only read-only repository tools plus local
+CodeGraph and Context7. Reviewers never receive Playwright or antidetect-browser
+access. Only the orchestrator process writes, comments, and merges.
 
 ## Live feedback and cancellation
 
@@ -56,21 +59,34 @@ from the same workspace.
 After the worker opens or updates a pull request, orch force-updates the same
 deterministic branch and polls the checks for the newly pushed commit until they
 finish. A failed check, a merge conflict, or a timeout is reported to the worker
-as the next attempt's previous failure. The reviewer is never started for a red
+as the next attempt's previous failure. Reviewers are never started for a red
 pull request or for a stale commit.
 
-The reviewer runs in a separate container with the worker checkout mounted
-read-only at `/review`, no GitHub token, and only `Read`, `Grep`, and `Glob`
-available. It receives the issue, the diff, and the green checks summary. Its
-result is constrained by a JSON schema:
+Two reviewers run in parallel, each in its own container with the worker
+checkout mounted read-only at `/review` and no GitHub token:
+
+- **Quality** (`prompt.md`) checks correctness, regressions, tests, and issue
+  scope.
+- **Security** (`prompt-security.md`) checks secret exposure, auth bypass,
+  injection, unsafe shell use, and other concrete security regressions.
+
+Reviewers have `Read`, `Grep`, `Glob`, local CodeGraph, and narrow Context7
+access. CodeGraph is optional; if the index is missing or stale, Grep is the
+fallback. Context7 is also optional and cannot park a review by itself. The
+reviewer containers run on an internal Docker network with no default route. A
+small gateway container forwards only the model port and Context7 TLS; all
+other egress is unreachable.
+
+Each reviewer result is constrained by a JSON schema:
 
 ```json
 {"findings": []}
 ```
 
-An empty array approves. Any finding blocks the merge; there is no severity
-field and no optional finding. The orchestrator posts every finding to the
-issue and passes the complete list into the next worker attempt.
+Both reviewers must return an empty array. Any finding from either role blocks
+the merge; there is no severity field and no optional finding. The orchestrator
+posts every finding to the issue and passes the complete list into the next
+worker attempt. A technical failure in either role is fail-closed.
 
 Worker attempts and reviewer rounds share one budget. `worker.max_attempts`
 defaults to 3 and `reviewer.max_rounds` defaults to 3. A failed worker attempt, a
@@ -82,7 +98,7 @@ immediately in `agent:needs-human`.
 A successful review is followed by a squash merge into `main` only. The
 repository base branch must be `main`; orch refuses to auto-merge into any other
 branch. A merge failure is also parked for a human. The persistent workspace is
-kept until a merge succeeds, a human is needed, or the reviewer is disabled.
+kept until a merge succeeds, a human is needed, or the review gate is disabled.
 
 If a run starts and finds an already-open PR for the same deterministic branch,
 it leaves that PR for a human (`agent:pr-open`) instead of starting another
@@ -91,11 +107,20 @@ up after the previous run; orch never auto-merges such a PR.
 
 ## Telegram status
 
-When `telegram.enabled` is true, orch sends at most three one-way messages per
-issue: `Orch принято`, `Orch завершено` with the PR URL and duration, and
-`Orch нужен человек` with the reason. Each message includes queue and active
-counts. The bot only sends messages; it does not read commands, buttons, or
-chat updates. A Telegram failure is logged and never interrupts the pipeline.
+When `telegram.enabled` is true, orch sends one-way messages to the configured
+topic. Status messages use emojis for fast scanning: `🚀 Orch принято`,
+`✅ Orch завершено` with the PR URL and duration, and `🚨 Orch нужен человек`
+with the reason. Intermediate failures are also reported, including failed
+attempts (`⚠️`), reviewer rejections (`🛑`), and technical errors (`🔥`) with the
+stage, attempt, run id, and a short redacted reason. Each message includes queue
+and active counts where relevant. The bot only sends messages; it does not read
+commands, buttons, or chat updates.
+
+Repeated daemon polling failures are reported once, then at most every 30
+minutes, with a `🟢` recovery message. Tokens, bearer headers, and obvious
+secret assignments are redacted. A failed send is logged, queued under
+`data_dir/telegram-queue.jsonl`, and retried on the next daemon startup. It never
+interrupts the pipeline.
 
 The bot token comes from `telegram.token_file` when configured, otherwise from
 `TELEGRAM_BOT_TOKEN`. For a forum, set `telegram.chat_id` to the supergroup and
@@ -133,8 +158,10 @@ checkout; it can be removed manually after the issue is resolved.
 - `uv`
 - Docker
 - `gh` authenticated as the repository owner
-- Claude Code inside the worker image
+- Claude Code, Node, CodeGraph, Playwright, and Chromium inside `orch-agent:latest`
 - An Ollama endpoint reachable from Docker at `host.docker.internal:11434`
+- Docker permission to create the internal `orch-review-net` network and the
+  `orch-review-gateway` container
 
 ## Setup
 
@@ -144,7 +171,18 @@ Copy-Item orch.yaml.example orch.yaml
 docker build -f docker/agent.Dockerfile -t orch-agent:latest .
 ```
 
-Create the issue on GitHub and add the `agent:queued` label. Run the daemon:
+If the default Debian mirror is slow from your network, pass a different one with
+`--build-arg DEBIAN_MIRROR=mirror.example.org`.
+
+The image is self-contained: Node 26, CodeGraph 1.6.2, Playwright and Chromium,
+ripgrep, jq, ffmpeg, and build tools are baked in. Playwright uses the Debian
+Chromium at `/usr/bin/chromium`; the build does not download Playwright's
+separate browser bundle. Claude Code receives a per-container `mcp.json`;
+CodeGraph and Context7 are available to both roles, while Playwright and
+antidetect-browser stay worker-only.
+
+Create the issue on GitHub and add the `agent:queued` label. Add `agent:hold`
+at any time before dispatch to keep orch away from the issue. Run the daemon:
 
 ```powershell
 $env:GH_TOKEN = (gh auth token --user slaid098)
@@ -241,12 +279,15 @@ Use this checklist for the first controlled run against a real issue. Complete
    - `Started reviewer container orch-review-...` — every reported GitHub check
      is complete and none failed. A failed check logs `Issue attempt failed`;
      the full `ChecksFailed: ...` text, including the failing check names, is
-     posted as a comment on the issue, and orch starts the next attempt. The
-     reviewer is never started for a red PR. If GitHub reports no checks at
-     all, orch waits for `checks.discovery_seconds` and continues on the local
-     test result.
-   - `Reviewer decision: approved` — the reviewer returned an empty `findings`
-     array. The raw `{"findings": []}` is in the run directory.
+     posted as a comment on the issue, and orch starts the next attempt. No
+     reviewer is started for a red PR. If GitHub reports no checks at all, orch
+     waits for `checks.discovery_seconds` and continues on the local test
+     result.
+   - `Reviewer role quality: approved` and `Reviewer role security: approved` —
+     both reviewers returned empty `findings` arrays. Each raw result is under
+     `review-<R>/<role>/`.
+   - `Reviewer decision: approved` — merged findings are empty and the PR may
+     merge.
    - `Squash-merged pull request #M` and `Issue #N merged: <url>` — the PR was
      squash-merged into `main`, and `Closes #N` in its body closes the issue.
 
@@ -273,8 +314,8 @@ Use this checklist for the first controlled run against a real issue. Complete
    - `attempt-<K>/events.jsonl` and `attempt-<K>/events.stderr.log` — the worker
      Claude Code stream and stderr. `tests.txt`, `diff.patch`, `handoff.json`,
      and `prompt.md` in the same directory hold the rest of the worker record.
-   - `review-<R>/review-output-1.json` — the raw reviewer JSON;
-     `review-output-2.json` appears only after a repair launch.
+   - `review-<R>/<role>/review-<role>-output-1.json` — the raw reviewer JSON;
+     `review-<role>-output-2.json` appears only after a repair launch.
      `review-prompt.md` and `review-schema.json` show what the reviewer was
      asked.
    - `app_data/orch.log` — the orchestrator's own DEBUG log, rotated according
@@ -321,10 +362,15 @@ Feature flags:
   one-shot worker.
 - `watchdog.enabled` — Clef-based hang and loop classification; requires an
   Ollama Cloud key.
-- `reviewer.enabled` — run the read-only reviewer and auto-merge approved PRs.
-  Disable it to stop after green checks and leave the PR for a human.
+- `reviewer.enabled` — run both read-only reviewers and auto-merge approved
+  PRs. Disable it to stop after green checks and leave the PR for a human.
 - `checks.*` — GitHub check polling timeout, interval, and the grace period for
   checks to appear after a PR is opened.
+- `mcp.*` — enable or disable CodeGraph, Context7, Playwright, and
+  antidetect-browser and override their URLs/commands. Reviewers always exclude
+  the worker-only servers.
+- `labels.hold` — human hold label (default `agent:hold`). A held issue is
+  skipped by dispatch and by the one-shot runner.
 
 ### Context window
 
@@ -351,10 +397,12 @@ and after every finished issue; old files are deleted, not archived.
 - The worker writes a git bundle and handoff to `/out`.
 - The orchestrator validates the bundle, creates the commit, pushes the branch,
   and opens the pull request.
-- The reviewer is a separate container with the checkout mounted read-only at
-  `/review`, no GitHub token, and only `Read`, `Grep`, and `Glob`.
+- Each reviewer is a separate container with the checkout mounted read-only at
+  `/review`, no GitHub token, and no direct internet route. A gateway forwards
+  only the model port and Context7 TLS.
 - Reviewer JSON is schema-validated and fail-closed; invalid output never
-  approves or merges. A repair launch is allowed once per review round.
+  approves or merges. A repair launch is allowed once per review role per
+  round. Both roles must independently return empty `findings`.
 - Only the orchestrator merges, and only into `main` after green checks and an
   empty reviewer findings array.
 - Logs stay in the local `app_data` directory and are pruned after
@@ -365,4 +413,4 @@ and after every finished issue; old files are deleted, not archived.
 - Multi-repository support
 - Per-project worker quotas
 - Issue dependency edges (`blocked_by`)
-- Hermes triggers or an MCP adapter
+- Hermes triggers

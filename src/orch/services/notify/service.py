@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import re
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 from orch.config.logger import get_logger
 from orch.schemas.config.types import Config
@@ -14,14 +16,23 @@ log = get_logger(component="notify")
 _TIMEOUT_SECONDS = 10
 _MAX_ATTEMPTS = 2
 _SECONDS_PER_MINUTE = 60
+_MAX_ERROR_CHARS = 1000
+_SECRET_PATTERNS = (
+    re.compile(r"bot\d+:[A-Za-z0-9_-]+"),
+    re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}"),
+    re.compile(r"github_pat_[A-Za-z0-9_]+"),
+    re.compile(r"Bearer\s+[^\s]+", re.IGNORECASE),
+    re.compile(r"(?i)(token|password|secret|api[_-]?key)\s*[=:]\s*\S+"),
+)
 
 
 def send(config: Config, text: str) -> bool:
     """Send a plain-text Telegram message.
 
     The call never raises: disabled or incomplete configuration, transport
-    failures, and API errors all return ``False``. Transport errors are
-    retried once.
+    failures, and API errors all return ``False``. A failed message is queued
+    in ``data_dir`` and retried by :func:`flush_pending` on the next startup.
+    Transport errors are retried once.
 
     Args:
         config: Orchestrator configuration with Telegram settings.
@@ -30,17 +41,54 @@ def send(config: Config, text: str) -> bool:
     Returns:
         ``True`` when Telegram accepted the message, otherwise ``False``.
     """
-    telegram = config.telegram
-    if not telegram.enabled:
-        log.debug("Telegram notifications are disabled")
+    if not _telegram_ready(config):
         return False
-    if not telegram.token:
-        log.warning("Telegram notification skipped: token is not configured")
-        return False
-    if not telegram.chat_id:
-        log.warning("Telegram notification skipped: chat_id is not configured")
-        return False
+    if _send_now(config, text):
+        return True
+    _queue(config, text)
+    return False
 
+
+def flush_pending(config: Config) -> int:
+    """Retry messages left in the Telegram queue by a previous failure.
+
+    Args:
+        config: Orchestrator configuration with Telegram settings.
+
+    Returns:
+        Number of queued messages accepted by Telegram.
+    """
+    if not _telegram_ready(config):
+        return 0
+    path = _queue_path(config)
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return 0
+    except OSError as ex:
+        log.bind(error=ex, error_type=type(ex).__name__).warning(
+            "Could not read the Telegram queue"
+        )
+        return 0
+
+    pending: list[str] = []
+    sent = 0
+    for line in lines:
+        text = _queued_text(line)
+        if text is None:
+            continue
+        if _send_now(config, text):
+            sent += 1
+        else:
+            pending.append(line)
+    _write_queue(path, pending)
+    if sent:
+        log.info("Delivered {} queued Telegram notification(s)", sent)
+    return sent
+
+
+def _send_now(config: Config, text: str) -> bool:
+    telegram = config.telegram
     payload: dict[str, object] = {
         "chat_id": telegram.chat_id,
         "text": text,
@@ -87,6 +135,57 @@ def send(config: Config, text: str) -> bool:
     return False
 
 
+def _telegram_ready(config: Config) -> bool:
+    telegram = config.telegram
+    if not telegram.enabled:
+        log.debug("Telegram notifications are disabled")
+        return False
+    if not telegram.token:
+        log.warning("Telegram notification skipped: token is not configured")
+        return False
+    if not telegram.chat_id:
+        log.warning("Telegram notification skipped: chat_id is not configured")
+        return False
+    return True
+
+
+def _queue_path(config: Config) -> Path:
+    return config.data_dir / "telegram-queue.jsonl"
+
+
+def _queue(config: Config, text: str) -> None:
+    try:
+        path = _queue_path(config)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"text": text}, ensure_ascii=False) + "\n")
+    except OSError as ex:
+        log.bind(error=ex, error_type=type(ex).__name__).warning(
+            "Could not queue failed Telegram notification"
+        )
+
+
+def _queued_text(line: str) -> str | None:
+    try:
+        payload = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    text = payload.get("text") if isinstance(payload, dict) else None
+    return text if isinstance(text, str) and text else None
+
+
+def _write_queue(path: Path, lines: list[str]) -> None:
+    try:
+        if lines:
+            path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        else:
+            path.unlink(missing_ok=True)
+    except OSError as ex:
+        log.bind(error=ex, error_type=type(ex).__name__).warning(
+            "Could not update the Telegram queue"
+        )
+
+
 def notify_accepted(
     config: Config,
     issue_number: int,
@@ -109,8 +208,8 @@ def notify_accepted(
     """
     text = "\n".join(
         [
-            "Orch принято",
-            f"repo: {config.repo.full_name}",
+            "🚀 Orch принято",
+            _repo_line(config),
             _issue_line(issue_number, issue_title),
             _queue_line(queue, active),
         ]
@@ -144,11 +243,11 @@ def notify_finished(
     """
     text = "\n".join(
         [
-            "Orch завершено",
-            f"repo: {config.repo.full_name}",
+            "✅ Orch завершено",
+            _repo_line(config),
             _issue_line(issue_number, issue_title),
-            f"PR: {pr_url}",
-            f"длительность: {_format_duration(duration_seconds)}",
+            f"🔗 PR: {pr_url}",
+            f"⏱ длительность: {_format_duration(duration_seconds)}",
             _queue_line(queue, active),
         ]
     )
@@ -179,22 +278,127 @@ def notify_needs_human(
     """
     text = "\n".join(
         [
-            "Orch нужен человек",
-            f"repo: {config.repo.full_name}",
+            "🚨 Orch нужен человек",
+            _repo_line(config),
             _issue_line(issue_number, issue_title),
-            f"причина: {reason}",
+            f"💥 причина: {_clean(reason)}",
             _queue_line(queue, active),
         ]
     )
     return send(config, text)
 
 
-def _issue_line(issue_number: int, issue_title: str) -> str:
-    return f"issue: #{issue_number} {issue_title}"
+def notify_attempt_failed(
+    config: Config,
+    issue_number: int,
+    issue_title: str,
+    *,
+    attempt: int,
+    max_attempts: int,
+    error: Exception | str,
+    run_id: str = "",
+    pr_url: str | None = None,
+) -> bool:
+    """Notify that one attempt failed and a retry may follow."""
+    lines = [
+        "⚠️ Orch: попытка не удалась",
+        _repo_line(config),
+        _issue_line(issue_number, issue_title),
+        f"🔁 попытка: {attempt}/{max_attempts}",
+        f"💥 ошибка: {_error_text(error)}",
+    ]
+    if pr_url:
+        lines.append(f"🔗 PR: {pr_url}")
+    if run_id:
+        lines.append(f"🗂 run: {run_id}")
+    return send(config, "\n".join(lines))
+
+
+def notify_review_blocked(
+    config: Config,
+    issue_number: int,
+    issue_title: str,
+    *,
+    findings: int,
+    review_round: int,
+    max_rounds: int,
+    run_id: str = "",
+    pr_url: str = "",
+) -> bool:
+    """Notify that a reviewer found blocking issues."""
+    lines = [
+        "🛑 Orch: ревьюер заблокировал PR",
+        _repo_line(config),
+        _issue_line(issue_number, issue_title),
+        f"🧐 findings: {findings}",
+        f"🔁 раунд ревью: {review_round}/{max_rounds}",
+    ]
+    if pr_url:
+        lines.append(f"🔗 PR: {pr_url}")
+    if run_id:
+        lines.append(f"🗂 run: {run_id}")
+    return send(config, "\n".join(lines))
+
+
+def notify_error(
+    config: Config,
+    *,
+    stage: str,
+    error: Exception | str,
+    issue_number: int | None = None,
+    issue_title: str = "",
+    run_id: str = "",
+    pr_url: str | None = None,
+    attempt: int | None = None,
+    max_attempts: int | None = None,
+) -> bool:
+    """Notify about a technical or system failure in any stage."""
+    lines = [
+        "🔥 Orch: ошибка",
+        _repo_line(config),
+        _issue_line(issue_number, issue_title),
+        f"🧩 stage: {stage}",
+    ]
+    if attempt is not None and max_attempts is not None:
+        lines.append(f"🔁 попытка: {attempt}/{max_attempts}")
+    lines.append(f"💥 ошибка: {_error_text(error)}")
+    if pr_url:
+        lines.append(f"🔗 PR: {pr_url}")
+    if run_id:
+        lines.append(f"🗂 run: {run_id}")
+    return send(config, "\n".join(lines))
+
+
+def notify_recovered(
+    config: Config,
+    *,
+    component: str,
+    detail: str = "",
+) -> bool:
+    """Notify that a previously failing background component recovered."""
+    lines = [
+        "🟢 Orch: восстановлено",
+        _repo_line(config),
+        f"🧩 component: {component}",
+    ]
+    if detail:
+        lines.append(f"ℹ️ {_clean(detail)}")
+    return send(config, "\n".join(lines))
+
+
+def _repo_line(config: Config) -> str:
+    return f"📦 repo: {config.repo.full_name}"
+
+
+def _issue_line(issue_number: int | None, issue_title: str) -> str:
+    if issue_number is None:
+        return "🎯 issue: —"
+    title = f" {issue_title}" if issue_title else ""
+    return f"🎯 issue: #{issue_number}{title}"
 
 
 def _queue_line(queue: int, active: int) -> str:
-    return f"очередь: {queue}, активных: {active}"
+    return f"👥 очередь: {queue}, активных: {active}"
 
 
 def _format_duration(duration_seconds: int) -> str:
@@ -202,6 +406,18 @@ def _format_duration(duration_seconds: int) -> str:
     seconds = max(duration_seconds, 0)
     minutes = (seconds + _SECONDS_PER_MINUTE - 1) // _SECONDS_PER_MINUTE
     return f"{minutes} мин"
+
+
+def _error_text(error: Exception | str) -> str:
+    text = f"{type(error).__name__}: {error}" if isinstance(error, Exception) else error
+    return _clean(text)
+
+
+def _clean(text: str) -> str:
+    value = text.strip()
+    for pattern in _SECRET_PATTERNS:
+        value = pattern.sub("[redacted]", value)
+    return value[:_MAX_ERROR_CHARS]
 
 
 def _close(response: object) -> None:

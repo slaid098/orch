@@ -17,7 +17,7 @@ from orch.schemas.pipeline.types import AttemptCycle, AttemptSuccess, RunOutcome
 from orch.schemas.reviewer.types import ReviewFinding
 from orch.schemas.worker.types import WorkerResult
 from orch.services import git as gitops
-from orch.services import github, store
+from orch.services import github, notify, store
 from orch.services.feedback.service import CommentFeed
 from orch.services.pipeline.failures import (
     _comment_attempt_failure as _comment_attempt_failure,
@@ -186,9 +186,7 @@ def _start_run(
     repo = config.repo.full_name
     existing_pr = _find_open_pr(repo, branch, token)
     if existing_pr:
-        return _finish_existing_pr(
-            config, issue, token, run_dir, run_id, branch, existing_pr
-        )
+        return _finish_existing_pr(config, issue, token, run_dir, run_id, branch, existing_pr)
     if claim:
         github.edit_labels(
             repo,
@@ -409,7 +407,9 @@ def _retry_until_success(
         config,
         issue,
         token,
-        run_dir=run_dir, run_id=run_id, branch=branch,
+        run_dir=run_dir,
+        run_id=run_id,
+        branch=branch,
         error=error,
         attempts=config.worker.max_attempts,
         pr_url=last_pr_url,
@@ -441,9 +441,16 @@ def _run_attempt_cycle(
             config,
             issue,
             token,
-            run_id=run_id, run_dir=run_dir, branch=branch, title=title,
-            timeout_seconds=timeout_seconds, source=source, workspace=workspace,
-            feed=feed, initial_context=initial_context, attempt=attempt,
+            run_id=run_id,
+            run_dir=run_dir,
+            branch=branch,
+            title=title,
+            timeout_seconds=timeout_seconds,
+            source=source,
+            workspace=workspace,
+            feed=feed,
+            initial_context=initial_context,
+            attempt=attempt,
             previous_error=previous_error,
         )
     except Exception as ex:
@@ -452,8 +459,11 @@ def _run_attempt_cycle(
             issue,
             token,
             ex,
-            run_id=run_id, run_dir=run_dir, branch=branch,
-            attempt=attempt, review_rounds=review_rounds,
+            run_id=run_id,
+            run_dir=run_dir,
+            branch=branch,
+            attempt=attempt,
+            review_rounds=review_rounds,
             last_pr_url=last_pr_url,
         )
     if isinstance(attempt_result, RunOutcome):
@@ -463,9 +473,13 @@ def _run_attempt_cycle(
         issue,
         token,
         attempt_result,
-        run_id=run_id, run_dir=run_dir, branch=branch,
-        attempt=attempt, review_rounds=review_rounds,
-        feed=feed, workspace=workspace,
+        run_id=run_id,
+        run_dir=run_dir,
+        branch=branch,
+        attempt=attempt,
+        review_rounds=review_rounds,
+        feed=feed,
+        workspace=workspace,
     )
 
 
@@ -543,7 +557,9 @@ def _gate_cycle(
         issue,
         token,
         attempt_result,
-        run_dir=run_dir, run_id=run_id, branch=branch,
+        run_dir=run_dir,
+        run_id=run_id,
+        branch=branch,
         attempt=attempt,
         review_rounds=review_rounds,
         checks_summary=checks_summary,
@@ -617,8 +633,10 @@ def _review_cycle(
             config,
             issue,
             attempt_result,
-            workspace=workspace, run_dir=run_dir,
-            checks_summary=checks_summary, review_round=review_round,
+            workspace=workspace,
+            run_dir=run_dir,
+            checks_summary=checks_summary,
+            review_round=review_round,
         )
     except Exception as ex:
         return _review_failure_cycle(
@@ -627,8 +645,11 @@ def _review_cycle(
             token,
             attempt_result,
             ex,
-            run_dir=run_dir, run_id=run_id, branch=branch,
-            attempt=attempt, review_round=review_round,
+            run_dir=run_dir,
+            run_id=run_id,
+            branch=branch,
+            attempt=attempt,
+            review_round=review_round,
         )
     if review.approved:
         return _approved_review_cycle(
@@ -636,8 +657,11 @@ def _review_cycle(
             issue,
             token,
             attempt_result,
-            run_dir=run_dir, run_id=run_id, workspace=workspace,
-            attempt=attempt, review_round=review_round,
+            run_dir=run_dir,
+            run_id=run_id,
+            workspace=workspace,
+            attempt=attempt,
+            review_round=review_round,
             checks_summary=checks_summary,
         )
     return _rejected_review_cycle(
@@ -646,8 +670,11 @@ def _review_cycle(
         token,
         attempt_result,
         review.findings,
-        run_dir=run_dir, run_id=run_id, branch=branch,
-        attempt=attempt, review_round=review_round,
+        run_dir=run_dir,
+        run_id=run_id,
+        branch=branch,
+        attempt=attempt,
+        review_round=review_round,
     )
 
 
@@ -671,7 +698,9 @@ def _review_failure_cycle(
         token,
         attempt_result,
         reviewer_error,
-        run_dir=run_dir, run_id=run_id, branch=branch,
+        run_dir=run_dir,
+        run_id=run_id,
+        branch=branch,
         attempt=attempt,
         review_round=review_round,
     )
@@ -726,10 +755,17 @@ def _rejected_review_cycle(
 ) -> AttemptCycle:
     review_error = ReviewRejected(_format_findings(findings))
     _comment_review_findings(config, issue, token, findings)
-    if (
-        review_round >= config.reviewer.max_rounds
-        or attempt >= config.worker.max_attempts
-    ):
+    notify.notify_review_blocked(
+        config,
+        issue.number,
+        issue.title,
+        findings=len(findings),
+        review_round=review_round,
+        max_rounds=config.reviewer.max_rounds,
+        run_id=run_id,
+        pr_url=attempt_result.pr_url,
+    )
+    if review_round >= config.reviewer.max_rounds or attempt >= config.worker.max_attempts:
         outcome = _park_after_retries(
             config,
             issue,
@@ -777,16 +813,30 @@ def _park_reviewer_failure(
         error=error,
         error_type=type(error).__name__,
     ).error("Reviewer failed technically; parking")
+    notify.notify_error(
+        config,
+        stage="reviewer",
+        error=error,
+        issue_number=issue.number,
+        issue_title=issue.title,
+        run_id=run_id,
+        pr_url=attempt_result.pr_url,
+        attempt=attempt,
+        max_attempts=config.worker.max_attempts,
+    )
     return _park_after_retries(
         config,
         issue,
         token,
-        run_dir=run_dir, run_id=run_id, branch=branch,
+        run_dir=run_dir,
+        run_id=run_id,
+        branch=branch,
         error=error,
         attempts=attempt,
         pr_url=attempt_result.pr_url,
         review_rounds=review_round,
     )
+
 
 def _run_attempt(
     config: Config,
@@ -810,7 +860,9 @@ def _run_attempt(
         issue,
         token,
         feed,
-        run_dir=run_dir, run_id=run_id, branch=branch,
+        run_dir=run_dir,
+        run_id=run_id,
+        branch=branch,
         attempts=attempt - 1,
     )
     if cancelled is not None:
@@ -832,7 +884,9 @@ def _run_attempt(
         issue,
         token,
         feed,
-        run_dir=run_dir, run_id=run_id, branch=branch,
+        run_dir=run_dir,
+        run_id=run_id,
+        branch=branch,
         attempts=attempt,
     )
     if cancelled is not None:
@@ -887,7 +941,9 @@ def _attempt_cancelled(
         issue,
         token,
         feed,
-        run_dir=run_dir, run_id=run_id, branch=branch,
+        run_dir=run_dir,
+        run_id=run_id,
+        branch=branch,
         attempts=attempts,
     )
 

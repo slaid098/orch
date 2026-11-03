@@ -9,7 +9,7 @@ from orch.exceptions.worker import RunCancelled, WatchdogStop
 from orch.schemas.config.types import Config
 from orch.schemas.github.types import Issue
 from orch.schemas.pipeline.types import RunOutcome
-from orch.services import github
+from orch.services import github, notify
 from orch.services.pipeline.lifecycle import (
     _cancel_run,
     _park_after_retries,
@@ -64,6 +64,15 @@ def _handle_attempt_failure(
         error_type=type(error).__name__,
     ).error("Issue attempt failed")
     _comment_attempt_failure(config, issue, token, attempt, error)
+    notify.notify_attempt_failed(
+        config,
+        issue.number,
+        issue.title,
+        attempt=attempt,
+        max_attempts=config.worker.max_attempts,
+        error=error,
+        run_id=run_id,
+    )
     _delete_stale_branch(config, branch, token)
 
 

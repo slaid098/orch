@@ -30,6 +30,7 @@ class LabelsConfig:
     running: str = "agent:running"
     needs_human: str = "agent:needs-human"
     pr_open: str = "agent:pr-open"
+    hold: str = "agent:hold"
 
 
 @dataclass(frozen=True)
@@ -107,6 +108,21 @@ class ReviewerConfig:
 
 
 @dataclass(frozen=True)
+class McpConfig:
+    """MCP servers exposed to worker and reviewer containers."""
+
+    enabled: bool = True
+    codegraph: bool = True
+    context7: bool = True
+    playwright: bool = True
+    antidetect: bool = True
+    context7_url: str = "https://mcp.context7.com/mcp"
+    antidetect_url: str = "http://80.85.139.21:8765/mcp/"
+    codegraph_command: str = "codegraph"
+    playwright_command: str = "playwright-mcp"
+
+
+@dataclass(frozen=True)
 class Config:
     """Complete orchestrator configuration."""
 
@@ -123,3 +139,4 @@ class Config:
     watchdog: WatchdogConfig = field(default_factory=WatchdogConfig)
     checks: ChecksConfig = field(default_factory=ChecksConfig)
     reviewer: ReviewerConfig = field(default_factory=ReviewerConfig)
+    mcp: McpConfig = field(default_factory=McpConfig)

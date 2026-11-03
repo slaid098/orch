@@ -3,12 +3,19 @@
 from __future__ import annotations
 
 import subprocess
+import threading
+import time
 from pathlib import Path
 
 from orch.config.logger import get_logger
 from orch.exceptions.docker import DockerError
 
 log = get_logger(component="docker")
+
+_REVIEW_NETWORK = "orch-review-net"
+_REVIEW_GATEWAY = "orch-review-gateway"
+_REVIEW_GATEWAY_SCRIPT = "/usr/local/bin/orch-review-gateway"
+_REVIEW_ENSURE_LOCK = threading.Lock()
 
 
 def _prepare_workspace_dir(workspace_path: Path) -> None:
@@ -21,6 +28,145 @@ def _prepare_workspace_dir(workspace_path: Path) -> None:
             error=ex,
             error_type=type(ex).__name__,
         ).warning("Could not widen workspace permissions")
+
+
+def _codegraph_mount(repo_path: Path) -> list[str]:
+    """Keep the reviewer checkout read-only while allowing index reads."""
+    index_path = repo_path / ".codegraph"
+    if not index_path.is_dir():
+        return []
+    return ["-v", f"{index_path}:/review/.codegraph:rw"]
+
+
+def _ensure_review_isolation(image: str) -> str:
+    """Create the internal review network and its TCP gateway.
+
+    The reviewer has no route to the internet. A small gateway container is
+    attached to both the internal network and the normal bridge; it forwards
+    only the model port and the Context7 TLS port. The returned IP is used as
+    the reviewer's ``host.docker.internal`` and ``mcp.context7.com``.
+    """
+    with _REVIEW_ENSURE_LOCK:
+        _ensure_review_network()
+        _ensure_review_gateway(image)
+        return _review_gateway_ip()
+
+
+def _ensure_review_network() -> None:
+    result = _run(
+        ["docker", "network", "inspect", _REVIEW_NETWORK],
+        timeout=30,
+        check=False,
+    )
+    if result.returncode == 0:
+        return
+    _run(
+        ["docker", "network", "create", "--internal", _REVIEW_NETWORK],
+        timeout=60,
+    )
+    log.info("Created internal reviewer network {}", _REVIEW_NETWORK)
+
+
+def _ensure_review_gateway(image: str) -> None:
+    running = _run(
+        ["docker", "inspect", "--format", "{{.State.Running}}", _REVIEW_GATEWAY],
+        timeout=30,
+        check=False,
+    )
+    if (running.stdout or "").strip() != "true":
+        _run(
+            ["docker", "rm", "-f", _REVIEW_GATEWAY],
+            timeout=60,
+            check=False,
+        )
+        _run(
+            [
+                "docker",
+                "run",
+                "-d",
+                "--name",
+                _REVIEW_GATEWAY,
+                "--label",
+                "orch.managed=true",
+                "--label",
+                "orch.review-gateway=true",
+                "--network",
+                "bridge",
+                "--add-host",
+                "host.docker.internal:host-gateway",
+                "--cap-drop",
+                "ALL",
+                "--cap-add",
+                "NET_BIND_SERVICE",
+                "--security-opt",
+                "no-new-privileges",
+                "--memory",
+                "256m",
+                "--cpus",
+                "1",
+                "--pids-limit",
+                "128",
+                "--user",
+                "root",
+                image,
+                "python",
+                _REVIEW_GATEWAY_SCRIPT,
+            ],
+            timeout=120,
+        )
+        log.info("Started isolated reviewer gateway")
+    connected = _run(
+        [
+            "docker",
+            "network",
+            "connect",
+            _REVIEW_NETWORK,
+            _REVIEW_GATEWAY,
+        ],
+        timeout=60,
+        check=False,
+    )
+    if connected.returncode != 0:
+        log.bind(stderr=(connected.stderr or "").strip()[-500:]).debug(
+            "Reviewer gateway network connect was already present"
+        )
+    _wait_for_gateway()
+
+
+def _wait_for_gateway() -> None:
+    """Wait until the gateway accepts both allowlisted ports."""
+    probe = (
+        "import socket; "
+        "s = socket.create_connection(('127.0.0.1', 11434), 1); s.close(); "
+        "s = socket.create_connection(('127.0.0.1', 443), 1); s.close()"
+    )
+    for _ in range(20):
+        result = _run(
+            ["docker", "exec", _REVIEW_GATEWAY, "python", "-c", probe],
+            timeout=30,
+            check=False,
+        )
+        if result.returncode == 0:
+            return
+        time.sleep(0.25)
+    raise DockerError("Reviewer gateway did not become ready")
+
+
+def _review_gateway_ip() -> str:
+    result = _run(
+        [
+            "docker",
+            "inspect",
+            "--format",
+            (f'{{{{(index .NetworkSettings.Networks "{_REVIEW_NETWORK}").IPAddress}}}}'),
+            _REVIEW_GATEWAY,
+        ],
+        timeout=30,
+    )
+    ip = (result.stdout or "").strip()
+    if not ip:
+        raise DockerError("Reviewer gateway has no internal network address")
+    return ip
 
 
 def _worker_run_args(
@@ -43,6 +189,8 @@ def _worker_run_args(
         "orch.managed=true",
         "--label",
         f"orch.container={name}",
+        "--add-host",
+        "host.docker.internal:host-gateway",
         "-v",
         f"{repo_path}:/src:ro",
         "-v",
@@ -111,10 +259,9 @@ def start_reviewer(
         DockerError: If the image is missing or the container cannot start.
     """
     if not _image_exists(image):
-        raise DockerError(
-            f"Reviewer image {image!r} does not exist. Build it with Docker."
-        )
+        raise DockerError(f"Reviewer image {image!r} does not exist. Build it with Docker.")
 
+    gateway_ip = _ensure_review_isolation(image)
     args = [
         "docker",
         "run",
@@ -125,8 +272,15 @@ def start_reviewer(
         "orch.managed=true",
         "--label",
         "orch.reviewer=true",
+        "--network",
+        _REVIEW_NETWORK,
+        "--add-host",
+        f"host.docker.internal:{gateway_ip}",
+        "--add-host",
+        f"mcp.context7.com:{gateway_ip}",
         "-v",
         f"{repo_path}:/review:ro",
+        *_codegraph_mount(repo_path),
         "-v",
         f"{run_dir}:/out",
         *_worker_env(model, context_tokens),
@@ -175,9 +329,7 @@ def start_worker(
         The container ID.
     """
     if not _image_exists(image):
-        raise DockerError(
-            f"Worker image {image!r} does not exist. Build it with Docker."
-        )
+        raise DockerError(f"Worker image {image!r} does not exist. Build it with Docker.")
 
     _prepare_workspace_dir(workspace_path)
     args = _worker_run_args(
@@ -250,14 +402,10 @@ def exec_in(
             check=False,
         )
     except subprocess.TimeoutExpired as ex:
-        log.bind(container=name, timeout=timeout).error(
-            "Container command timed out"
-        )
+        log.bind(container=name, timeout=timeout).error("Container command timed out")
         raise DockerError(f"Container command timed out after {timeout}s") from ex
     except OSError as ex:
-        log.bind(error=ex, error_type=type(ex).__name__).error(
-            "Could not execute docker exec"
-        )
+        log.bind(error=ex, error_type=type(ex).__name__).error("Could not execute docker exec")
         raise DockerError("Could not execute docker exec") from ex
     else:
         return result
@@ -280,6 +428,11 @@ def cleanup_managed() -> None:
         _run(["docker", "rm", "-f", container_id], timeout=60, check=False)
     if container_ids:
         log.info("Removed {} orphan worker container(s)", len(container_ids))
+    _run(
+        ["docker", "network", "rm", _REVIEW_NETWORK],
+        timeout=60,
+        check=False,
+    )
 
 
 def stop(name: str) -> None:
@@ -328,9 +481,7 @@ def _run(
         log.bind(args=args[:3], timeout=timeout).error("Docker command timed out")
         raise DockerError(f"Docker command timed out after {timeout}s") from ex
     except OSError as ex:
-        log.bind(error=ex, error_type=type(ex).__name__).error(
-            "Could not execute docker"
-        )
+        log.bind(error=ex, error_type=type(ex).__name__).error("Could not execute docker")
         raise DockerError("Could not execute docker") from ex
     else:
         if check and result.returncode != 0:

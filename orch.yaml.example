@@ -10,6 +10,7 @@ labels:
   running: agent:running
   needs_human: agent:needs-human
   pr_open: agent:pr-open
+  hold: agent:hold
 
 worker:
   image: orch-agent:latest
@@ -30,9 +31,10 @@ checks:
   poll_seconds: 15
   discovery_seconds: 60
 
-# The reviewer runs in a separate read-only container. It has no GitHub token
-# and may only Read, Grep, and Glob. An empty findings array approves; any
-# finding blocks the merge and consumes one shared worker attempt.
+# Two reviewers (quality and security) run in separate read-only containers.
+# They have no GitHub token; the internal network only reaches the model and
+# Context7 through a narrow gateway. An empty findings array from both approves;
+# any finding blocks the merge and consumes one shared worker attempt.
 reviewer:
   enabled: true
   image: orch-agent:latest
@@ -41,6 +43,15 @@ reviewer:
   max_rounds: 3
   autocompact: 200k
   allowed_tools: "Read,Grep,Glob"
+
+# MCP servers baked into the worker image. Reviewer containers only receive
+# codegraph and context7; playwright and antidetect stay worker-only.
+mcp:
+  enabled: true
+  codegraph: true
+  context7: true
+  playwright: true
+  antidetect: true
 
 data_dir: D:/orch/app_data
 retention_days: 7
