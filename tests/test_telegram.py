@@ -16,9 +16,14 @@ from orch.schemas.config.types import (
     WorkerConfig,
 )
 from orch.services.notify.service import (
+    flush_pending,
     notify_accepted,
+    notify_attempt_failed,
+    notify_error,
     notify_finished,
     notify_needs_human,
+    notify_recovered,
+    notify_review_blocked,
     send,
 )
 
@@ -251,10 +256,7 @@ def test_notify_accepted_message(
     )
 
     assert _body(calls[0][0])["text"] == (
-        "Orch принято\n"
-        "repo: owner/name\n"
-        "issue: #7 Fix bug\n"
-        "очередь: 3, активных: 1"
+        "🚀 Orch принято\n📦 repo: owner/name\n🎯 issue: #7 Fix bug\n👥 очередь: 3, активных: 1"
     )
 
 
@@ -278,12 +280,12 @@ def test_notify_finished_message(
     )
 
     assert _body(calls[0][0])["text"] == (
-        "Orch завершено\n"
-        "repo: owner/name\n"
-        "issue: #7 Fix bug\n"
-        "PR: https://github.com/owner/name/pull/9\n"
-        "длительность: 12 мин\n"
-        "очередь: 2, активных: 1"
+        "✅ Orch завершено\n"
+        "📦 repo: owner/name\n"
+        "🎯 issue: #7 Fix bug\n"
+        "🔗 PR: https://github.com/owner/name/pull/9\n"
+        "⏱ длительность: 12 мин\n"
+        "👥 очередь: 2, активных: 1"
     )
 
 
@@ -306,11 +308,11 @@ def test_notify_needs_human_message(
     )
 
     assert _body(calls[0][0])["text"] == (
-        "Orch нужен человек\n"
-        "repo: owner/name\n"
-        "issue: #7 Fix bug\n"
-        "причина: CI упал\n"
-        "очередь: 2, активных: 0"
+        "🚨 Orch нужен человек\n"
+        "📦 repo: owner/name\n"
+        "🎯 issue: #7 Fix bug\n"
+        "💥 причина: CI упал\n"
+        "👥 очередь: 2, активных: 0"
     )
 
 
@@ -323,7 +325,136 @@ def test_notify_returns_false_when_disabled(
 
     monkeypatch.setattr(urllib.request, "urlopen", fail)
 
-    assert (
-        notify_accepted(_config(tmp_path), 7, "Fix bug", queue=0, active=0)
-        is False
+    assert notify_accepted(_config(tmp_path), 7, "Fix bug", queue=0, active=0) is False
+
+
+def test_notify_attempt_failed_contains_actionable_context(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    calls = _install_urlopen(monkeypatch, [_FakeResponse()])
+
+    assert notify_attempt_failed(
+        _enabled_config(tmp_path),
+        7,
+        "Fix bug",
+        attempt=2,
+        max_attempts=3,
+        error=RuntimeError("worker stopped"),
+        run_id="run-7",
     )
+
+    text = _body(calls[0][0])["text"]
+    assert text.startswith("⚠️ Orch: попытка не удалась")
+    assert "🎯 issue: #7 Fix bug" in text
+    assert "🔁 попытка: 2/3" in text
+    assert "💥 ошибка: RuntimeError: worker stopped" in text
+    assert "🗂 run: run-7" in text
+
+
+def test_notify_review_blocked_contains_findings_and_round(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    calls = _install_urlopen(monkeypatch, [_FakeResponse()])
+
+    assert notify_review_blocked(
+        _enabled_config(tmp_path),
+        7,
+        "Fix bug",
+        findings=2,
+        review_round=1,
+        max_rounds=3,
+        run_id="run-7",
+        pr_url="https://example.test/pull/1",
+    )
+
+    text = _body(calls[0][0])["text"]
+    assert text.startswith("🛑 Orch: ревьюер заблокировал PR")
+    assert "🧐 findings: 2" in text
+    assert "🔁 раунд ревью: 1/3" in text
+    assert "🔗 PR: https://example.test/pull/1" in text
+
+
+def test_notify_error_redacts_secrets(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    calls = _install_urlopen(monkeypatch, [_FakeResponse()])
+
+    assert notify_error(
+        _enabled_config(tmp_path),
+        stage="reviewer",
+        error=(
+            "Bearer abc123 ghp_abcdefghijklmnopqrstuvwxyz "
+            '{"token": "json-token-value", '
+            "\"api_key\": 'json-api-key-value'}"
+        ),
+        issue_number=7,
+        issue_title="Fix bug",
+        run_id="run-7",
+        attempt=1,
+        max_attempts=2,
+    )
+
+    text = _body(calls[0][0])["text"]
+    assert "🔥 Orch: ошибка" in text
+    assert "🧩 stage: reviewer" in text
+    assert "🔁 попытка: 1/2" in text
+    assert "Bearer abc123" not in text
+    assert "ghp_abcdefghijklmnopqrstuvwxyz" not in text
+    assert "json-token-value" not in text
+    assert "json-api-key-value" not in text
+    assert "[redacted]" in text
+
+
+def test_notify_recovered_has_emoji_and_component(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    calls = _install_urlopen(monkeypatch, [_FakeResponse()])
+
+    assert notify_recovered(
+        _enabled_config(tmp_path),
+        component="daemon-poll",
+        detail="GitHub polling works again.",
+    )
+
+    text = _body(calls[0][0])["text"]
+    assert text.startswith("🟢 Orch: восстановлено")
+    assert "🧩 component: daemon-poll" in text
+
+
+def test_send_queues_a_failed_message(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _install_urlopen(
+        monkeypatch,
+        [OSError("offline"), OSError("still offline")],
+    )
+    config = _enabled_config(tmp_path)
+
+    assert not send(config, "⚠️ queued message")
+
+    queue = config.data_dir / "telegram-queue.jsonl"
+    assert queue.exists()
+    assert "queued message" in queue.read_text(encoding="utf-8")
+
+
+def test_flush_pending_delivers_and_removes_messages(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    calls = _install_urlopen(monkeypatch, [_FakeResponse()])
+    config = _enabled_config(tmp_path)
+    queue = config.data_dir / "telegram-queue.jsonl"
+    queue.parent.mkdir(parents=True)
+    queue.write_text(
+        json.dumps({"text": "🟢 recovered"}) + "\nbad json\n",
+        encoding="utf-8",
+    )
+
+    assert flush_pending(config) == 1
+    assert _body(calls[0][0])["text"] == "🟢 recovered"
+    assert not queue.exists()

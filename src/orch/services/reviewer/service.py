@@ -1,8 +1,10 @@
-"""Read-only reviewer container and binary JSON gate."""
+"""Read-only reviewer containers and the binary JSON gate."""
 
 from __future__ import annotations
 
+import hashlib
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +14,8 @@ from orch.schemas.config.types import Config
 from orch.schemas.github.types import Issue
 from orch.schemas.reviewer.types import ReviewFinding, ReviewResult
 from orch.services.docker import exec_in, start_reviewer, stop
+from orch.services.mcp import allowed_tools as mcp_allowed_tools
+from orch.services.mcp import write_reviewer_config
 from orch.services.worker import autocompact_tokens
 
 log = get_logger(component="reviewer")
@@ -44,6 +48,11 @@ _REVIEW_SCHEMA: dict[str, object] = {
 
 _FINDING_FIELDS = {"file", "line", "title", "situation", "fixes"}
 _MAX_LAUNCHES = 2
+_ROLE_PROMPTS = {
+    "quality": "prompt.md",
+    "security": "prompt-security.md",
+}
+_DEFAULT_ROLES = ("quality", "security")
 
 
 def build_prompt(
@@ -51,13 +60,16 @@ def build_prompt(
     issue: Issue,
     diff: str,
     checks_summary: str,
+    *,
+    role: str = "quality",
 ) -> str:
-    """Build the reviewer prompt from the role, issue, diff, and checks."""
-    role = (Path(__file__).parent / "prompt.md").read_text(encoding="utf-8")
+    """Build a reviewer prompt from the role, issue, diff, and checks."""
+    role_path = Path(__file__).parent / _ROLE_PROMPTS[role]
+    role_text = role_path.read_text(encoding="utf-8")
     schema = json.dumps(_REVIEW_SCHEMA, ensure_ascii=False, indent=2)
     checks = checks_summary.strip() or "GitHub checks did not report any entries."
     return (
-        f"{role}\n"
+        f"{role_text}\n"
         "## Issue\n"
         "<issue>\n"
         f"#{issue.number}: {issue.title}\n\n"
@@ -66,7 +78,8 @@ def build_prompt(
         "## Repository\n"
         f"- `{config.repo.full_name}`\n"
         f"- Base branch: `{config.repo.base_branch}`\n"
-        "- Read-only checkout: `/review`\n\n"
+        "- Read-only checkout: `/review`\n"
+        f"- Reviewer role: `{role}`\n\n"
         "## Checks\n"
         f"{checks}\n\n"
         "## Diff\n"
@@ -91,12 +104,14 @@ def run_review(
     run_dir: Path,
     checks_summary: str,
     timeout_seconds: int | None = None,
+    roles: tuple[str, ...] | None = None,
 ) -> ReviewResult:
-    """Run the reviewer at most twice and return a validated binary result.
+    """Run all reviewer roles and return one fail-closed binary result.
 
-    The first launch is the normal review. A second launch is a single repair
-    attempt after invalid output or a technical recovery. Reviewer failures are
-    raised as :class:`ReviewerError`; they never approve a pull request.
+    Each role has its own read-only container and may launch twice: the first
+    launch is the normal review, the second is a single repair attempt after
+    invalid output or a technical recovery. A technical failure in any role
+    fails the whole review; it never approves a pull request.
 
     Args:
         config: Orchestrator configuration.
@@ -104,41 +119,168 @@ def run_review(
         pr_url: Pull-request URL, included only as context.
         workspace_path: Worker checkout mounted read-only at ``/review``.
         diff_path: Diff produced by the worker.
-        run_dir: Host directory for reviewer prompts, schema, and output.
+        run_dir: Host directory for reviewer prompts, schemas, and output.
         checks_summary: Human-readable summary of green GitHub checks.
         timeout_seconds: Optional reviewer launch timeout.
+        roles: Reviewer roles to run. Defaults to quality and security.
 
     Returns:
-        Validated reviewer result. An empty finding tuple is an approval.
+        Merged reviewer result. An empty finding tuple is an approval.
 
     Raises:
-        ReviewerError: If both reviewer launches fail or return invalid output.
+        ReviewerError: If any reviewer fails technically or returns invalid
+            output after its repair launch.
     """
-    prompt, timeout = _prepare_review(
+    selected = _DEFAULT_ROLES if roles is None else roles
+    _validate_roles(selected)
+    diff = _read_diff(diff_path)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    timeout = timeout_seconds or config.reviewer.timeout_minutes * 60
+    prepared = {
+        role: _prepare_role(
+            config,
+            issue,
+            diff,
+            checks_summary,
+            run_dir / role,
+            role,
+            timeout,
+        )
+        for role in selected
+    }
+    results = _run_roles(
         config,
         issue,
-        diff_path,
-        run_dir,
-        checks_summary,
-        timeout_seconds,
+        pr_url,
+        workspace_path,
+        prepared,
+        selected,
     )
+    findings = tuple(finding for role in selected for finding in results[role].findings)
+    log.bind(
+        issue=issue.number,
+        pr_url=pr_url,
+        roles=list(selected),
+        findings=len(findings),
+    ).info(
+        "Reviewer decision: {}",
+        "approved" if not findings else "blocked",
+    )
+    return ReviewResult(findings=findings)
+
+
+def _validate_roles(roles: tuple[str, ...]) -> None:
+    unknown = [role for role in roles if role not in _ROLE_PROMPTS]
+    if unknown:
+        raise ReviewerError(f"unknown reviewer role(s): {', '.join(unknown)}")
+    if not roles:
+        raise ReviewerError("at least one reviewer role is required")
+
+
+def _prepare_role(
+    config: Config,
+    issue: Issue,
+    diff: str,
+    checks_summary: str,
+    role_dir: Path,
+    role: str,
+    timeout: int,
+) -> tuple[Path, str, Path | None, int]:
+    role_dir.mkdir(parents=True, exist_ok=True)
+    prompt = build_prompt(
+        config,
+        issue,
+        diff,
+        checks_summary,
+        role=role,
+    )
+    _write_text(role_dir / "review-prompt.md", prompt)
+    _write_text(
+        role_dir / "review-schema.json",
+        json.dumps(_REVIEW_SCHEMA, ensure_ascii=False, indent=2) + "\n",
+    )
+    mcp_path = write_reviewer_config(config, role_dir / "mcp.json")
+    return role_dir, prompt, mcp_path, timeout
+
+
+def _run_roles(
+    config: Config,
+    issue: Issue,
+    pr_url: str,
+    workspace_path: Path,
+    prepared: dict[str, tuple[Path, str, Path | None, int]],
+    roles: tuple[str, ...],
+) -> dict[str, ReviewResult]:
+    if len(roles) == 1:
+        role = roles[0]
+        return {
+            role: _run_role(
+                config,
+                issue,
+                pr_url,
+                workspace_path,
+                prepared[role],
+                role,
+            )
+        }
+
+    results: dict[str, ReviewResult] = {}
+    errors: list[str] = []
+    with ThreadPoolExecutor(
+        max_workers=len(roles),
+        thread_name_prefix="orch-review",
+    ) as executor:
+        futures = {
+            role: executor.submit(
+                _run_role,
+                config,
+                issue,
+                pr_url,
+                workspace_path,
+                prepared[role],
+                role,
+            )
+            for role in roles
+        }
+    for role in roles:
+        try:
+            results[role] = futures[role].result()
+        except Exception as ex:
+            errors.append(f"{role}: {ex}")
+    if errors:
+        raise ReviewerError("reviewer role(s) failed: " + "; ".join(errors))
+    return results
+
+
+def _run_role(
+    config: Config,
+    issue: Issue,
+    pr_url: str,
+    workspace_path: Path,
+    prepared: tuple[Path, str, Path | None, int],
+    role: str,
+) -> ReviewResult:
+    role_dir, prompt, mcp_path, timeout = prepared
     last_error = "reviewer produced no output"
     for launch in range(1, _MAX_LAUNCHES + 1):
         try:
             result = _review_launch(
                 config,
-                run_dir,
                 workspace_path,
                 prompt=prompt,
                 last_error=last_error,
                 launch=launch,
                 timeout=timeout,
+                role=role,
+                role_dir=role_dir,
+                mcp_path=mcp_path,
             )
         except ReviewerError as ex:
             last_error = str(ex)
             log.bind(
                 issue=issue.number,
                 pr_url=pr_url,
+                role=role,
                 launch=launch,
                 error=ex,
                 error_type=type(ex).__name__,
@@ -147,59 +289,122 @@ def run_review(
         log.bind(
             issue=issue.number,
             pr_url=pr_url,
+            role=role,
             launch=launch,
             findings=len(result.findings),
-        ).info("Reviewer decision: {}", "approved" if result.approved else "blocked")
+        ).info(
+            "Reviewer role {}: {}",
+            role,
+            "approved" if result.approved else "blocked",
+        )
         return result
 
     log.bind(
         issue=issue.number,
         pr_url=pr_url,
+        role=role,
         error=last_error,
-    ).error("Reviewer failed after two launches")
-    raise ReviewerError(last_error)
-
-
-def _prepare_review(
-    config: Config,
-    issue: Issue,
-    diff_path: Path,
-    run_dir: Path,
-    checks_summary: str,
-    timeout_seconds: int | None,
-) -> tuple[str, int]:
-    diff = _read_diff(diff_path)
-    run_dir.mkdir(parents=True, exist_ok=True)
-    prompt = build_prompt(config, issue, diff, checks_summary)
-    _write_text(run_dir / "review-prompt.md", prompt)
-    _write_text(
-        run_dir / "review-schema.json",
-        json.dumps(_REVIEW_SCHEMA, ensure_ascii=False, indent=2) + "\n",
-    )
-    return prompt, timeout_seconds or config.reviewer.timeout_minutes * 60
+    ).error("Reviewer role failed after two launches")
+    raise ReviewerError(f"{role}: {last_error}")
 
 
 def _review_launch(
     config: Config,
-    run_dir: Path,
     workspace_path: Path,
     *,
     prompt: str,
     last_error: str,
     launch: int,
     timeout: int,
+    role: str,
+    role_dir: Path,
+    mcp_path: Path | None,
 ) -> ReviewResult:
     launch_prompt = prompt if launch == 1 else _repair_prompt(prompt, last_error)
-    _write_text(run_dir / "review-prompt.md", launch_prompt)
+    _write_text(role_dir / "review-prompt.md", launch_prompt)
     raw = _run_launch(
         config,
-        run_dir,
+        role_dir,
         workspace_path,
         timeout=timeout,
         launch=launch,
+        role=role,
+        mcp_path=mcp_path,
     )
-    _write_text(run_dir / f"review-output-{launch}.json", raw)
+    _write_text(role_dir / f"review-{role}-output-{launch}.json", raw)
     return parse_review(raw)
+
+
+def _read_diff(diff_path: Path) -> str:
+    try:
+        return diff_path.read_text(encoding="utf-8", errors="replace")
+    except OSError as ex:
+        raise ReviewerError(f"Could not read reviewer diff: {diff_path}") from ex
+
+
+def _run_launch(
+    config: Config,
+    run_dir: Path,
+    workspace_path: Path,
+    *,
+    timeout: int,
+    launch: int,
+    role: str,
+    mcp_path: Path | None,
+) -> str:
+    container = _container_name(run_dir, role, launch)
+    image = config.reviewer.image or config.worker.image
+    model = config.reviewer.model or config.worker.model
+    try:
+        start_reviewer(
+            image=image,
+            name=container,
+            repo_path=workspace_path,
+            run_dir=run_dir,
+            model=model,
+            context_tokens=autocompact_tokens(config.reviewer.autocompact),
+            codegraph_enabled=config.mcp.enabled and config.mcp.codegraph,
+        )
+    except Exception as ex:
+        raise ReviewerError(f"Could not start reviewer container: {ex}") from ex
+
+    try:
+        result = exec_in(
+            container,
+            _command(config, mcp_path),
+            timeout=timeout,
+            workdir="/review",
+        )
+    except Exception as ex:
+        raise ReviewerError(f"Could not execute reviewer: {ex}") from ex
+    finally:
+        stop(container)
+
+    if result.returncode != 0:
+        details = (result.stderr or result.stdout or "").strip()
+        raise ReviewerError(f"reviewer exited with {result.returncode}: {details[-2000:]}")
+    return (result.stdout or "").strip()
+
+
+def _command(config: Config, mcp_path: Path | None) -> str:
+    reviewer = config.reviewer
+    tools = [reviewer.allowed_tools]
+    tools.extend(mcp_allowed_tools(config, "reviewer"))
+    allowed = ",".join(tool for tool in tools if tool)
+    mcp_flags = ""
+    if mcp_path is not None:
+        mcp_flags = "--mcp-config /out/mcp.json --strict-mcp-config "
+    return (
+        "cd /review && claude -p "
+        "--permission-mode plan "
+        "--permission-prompts none "
+        f'--allowedTools "{allowed}" '
+        f"{mcp_flags}"
+        f"--autocompact {reviewer.autocompact} "
+        f'--model "{reviewer.model or config.worker.model}" '
+        '--json-schema "$(cat /out/review-schema.json)" '
+        "< /out/review-prompt.md"
+    )
 
 
 def parse_review(raw: str) -> ReviewResult:
@@ -221,69 +426,6 @@ def parse_review(raw: str) -> ReviewResult:
     if not isinstance(items, list):
         raise ReviewerError("reviewer findings must be an array")
     return ReviewResult(findings=tuple(_parse_finding(item) for item in items))
-
-
-def _read_diff(diff_path: Path) -> str:
-    try:
-        return diff_path.read_text(encoding="utf-8", errors="replace")
-    except OSError as ex:
-        raise ReviewerError(f"Could not read reviewer diff: {diff_path}") from ex
-
-
-def _run_launch(
-    config: Config,
-    run_dir: Path,
-    workspace_path: Path,
-    *,
-    timeout: int,
-    launch: int,
-) -> str:
-    container = _container_name(run_dir, launch)
-    image = config.reviewer.image or config.worker.image
-    model = config.reviewer.model or config.worker.model
-    try:
-        start_reviewer(
-            image=image,
-            name=container,
-            repo_path=workspace_path,
-            run_dir=run_dir,
-            model=model,
-            context_tokens=autocompact_tokens(config.reviewer.autocompact),
-        )
-    except Exception as ex:
-        raise ReviewerError(f"Could not start reviewer container: {ex}") from ex
-
-    try:
-        result = exec_in(
-            container,
-            _command(config),
-            timeout=timeout,
-            workdir="/review",
-        )
-    except Exception as ex:
-        raise ReviewerError(f"Could not execute reviewer: {ex}") from ex
-    finally:
-        stop(container)
-
-    if result.returncode != 0:
-        details = (result.stderr or result.stdout or "").strip()
-        raise ReviewerError(
-            f"reviewer exited with {result.returncode}: {details[-2000:]}"
-        )
-    return (result.stdout or "").strip()
-
-
-def _command(config: Config) -> str:
-    reviewer = config.reviewer
-    return (
-        'cd /review && claude -p "$(cat /out/review-prompt.md)" '
-        "--permission-mode plan "
-        "--permission-prompts none "
-        f'--allowedTools "{reviewer.allowed_tools}" '
-        f"--autocompact {reviewer.autocompact} "
-        f'--model "{reviewer.model or config.worker.model}" '
-        '--json-schema "$(cat /out/review-schema.json)"'
-    )
 
 
 def _parse_finding(item: object) -> ReviewFinding:
@@ -368,8 +510,7 @@ def _positive_int(value: object, name: str) -> int:
     return value
 
 
-def _container_name(run_dir: Path, launch: int) -> str:
-    name = f"orch-review-{run_dir.parent.name}-{run_dir.name}-{launch}".lower()
-    return "".join(char if char.isalnum() or char in "-_." else "-" for char in name)[
-        :63
-    ]
+def _container_name(run_dir: Path, role: str, launch: int) -> str:
+    identity = hashlib.sha1(str(run_dir.resolve()).encode("utf-8")).hexdigest()[:12]
+    name = f"orch-review-{identity}-{role}-{launch}".lower()
+    return "".join(char if char.isalnum() or char in "-_." else "-" for char in name)[:63]

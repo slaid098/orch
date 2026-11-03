@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -107,6 +108,7 @@ def test_initialize_resolves_token_and_labels(
         "agent:running",
         "agent:needs-human",
         "agent:pr-open",
+        "agent:hold",
     }
     assert calls[2] == ("db", config.data_dir / "orch.db")
 
@@ -327,6 +329,29 @@ def test_claim_issue_returns_false_on_github_error(
     assert not daemon._claim_issue(config, _issue(), "token")
 
 
+def test_claim_failure_notification_is_rate_limited(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    sent: list[int] = []
+    daemon._claim_notified_at.clear()
+
+    def fail(*_args: object, **_kwargs: object) -> None:
+        raise GitHubError("offline")
+
+    monkeypatch.setattr(daemon.github, "edit_labels", fail)
+    monkeypatch.setattr(
+        daemon.notify,
+        "notify_error",
+        lambda *_args, **kwargs: sent.append(kwargs["issue_number"]),
+    )
+
+    assert not daemon._claim_issue(config, _issue(), "token")
+    assert not daemon._claim_issue(config, _issue(), "token")
+    assert sent == [7]
+
+
 def test_reconcile_startup_requeues_running_issues(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -414,9 +439,7 @@ def test_run_daemon_sends_accepted_notification(
     monkeypatch.setattr(
         daemon.notify,
         "notify_accepted",
-        lambda _config, number, _title, *, queue, active: accepted.append(
-            (number, queue, active)
-        ),
+        lambda _config, number, _title, *, queue, active: accepted.append((number, queue, active)),
     )
 
     def interrupt(_seconds: int) -> None:
@@ -462,8 +485,8 @@ def test_reap_finished_sends_pr_and_needs_human_notifications(
     monkeypatch.setattr(
         daemon.notify,
         "notify_finished",
-        lambda _config, number, _title, *, pr_url, duration_seconds, queue, active: (
-            finished.append((number, duration_seconds, queue, active))
+        lambda _config, number, _title, *, pr_url, duration_seconds, queue, active: finished.append(
+            (number, duration_seconds, queue, active)
         ),
     )
     monkeypatch.setattr(
@@ -568,3 +591,44 @@ def test_notify_outcome_treats_merged_as_finished(
     )
 
     assert finished == [("https://example.test/pr/7", 42)]
+
+
+def test_run_once_refuses_human_hold(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    held = replace(_issue(), labels=("agent:queued", "agent:hold"))
+    monkeypatch.setattr(daemon.github, "get_issue", lambda *_args: held)
+    monkeypatch.setattr(
+        daemon,
+        "run_issue",
+        lambda *_args, **_kwargs: pytest.fail("hold issue must not run"),
+    )
+
+    assert daemon.run_once(config, "token", 7) == 1
+
+
+def test_dispatch_issues_skips_human_hold(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    held = replace(_issue(), labels=("agent:queued", "agent:hold"))
+    claimed: list[int] = []
+    monkeypatch.setattr(
+        daemon,
+        "_claim_issue",
+        lambda _config, issue, _token: claimed.append(issue.number) or True,
+    )
+
+    daemon._dispatch_issues(
+        [held],
+        {},
+        config,
+        "token",
+        tmp_path / "orch.db",
+        object(),  # type: ignore[arg-type]
+    )
+
+    assert claimed == []

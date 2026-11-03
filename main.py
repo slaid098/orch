@@ -9,6 +9,7 @@ from loguru import logger
 
 from orch.config.settings import load_config
 from orch.exceptions.config import ConfigError
+from orch.services import notify
 from orch.services.daemon import initialize, run_daemon, run_once, setup_logging
 
 
@@ -25,18 +26,15 @@ def main(argv: list[str] | None = None) -> int:
     try:
         config = load_config(Path("orch.yaml"))
     except ConfigError as ex:
-        logger.bind(error=ex, error_type=type(ex).__name__).error(
-            "Configuration error"
-        )
+        logger.bind(error=ex, error_type=type(ex).__name__).error("Configuration error")
         return 2
 
     setup_logging(config)
     try:
         token = initialize(config)
     except Exception as ex:
-        logger.bind(error=ex, error_type=type(ex).__name__).error(
-            "Could not initialize orch"
-        )
+        logger.bind(error=ex, error_type=type(ex).__name__).error("Could not initialize orch")
+        notify.notify_error(config, stage="startup", error=ex)
         return 1
 
     if args.once:

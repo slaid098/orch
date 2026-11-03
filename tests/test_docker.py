@@ -57,6 +57,7 @@ def test_start_worker_runs_a_container(
     assert container == "abc123"
     assert args[:3] == ["docker", "run", "-d"]
     assert "image:latest" in args
+    assert "host.docker.internal:host-gateway" in args
     assert (tmp_path / "work").is_dir()
 
 
@@ -148,6 +149,8 @@ def test_cleanup_managed_removes_each_container(
         calls.append(args)
         if args[:2] == ["docker", "ps"]:
             return _proc("one\ntwo\n")
+        if args[:3] == ["docker", "network", "inspect"]:
+            return _proc("true\n")
         return _proc()
 
     monkeypatch.setattr(docker, "_run", fake_run)
@@ -158,6 +161,8 @@ def test_cleanup_managed_removes_each_container(
         ["docker", "ps", "-aq"],
         ["docker", "rm", "-f"],
         ["docker", "rm", "-f"],
+        ["docker", "network", "inspect"],
+        ["docker", "network", "rm"],
     ]
 
 
@@ -173,7 +178,8 @@ def test_cleanup_managed_handles_no_containers(
 
     docker.cleanup_managed()
 
-    assert len(calls) == 1
+    assert len(calls) == 2
+    assert calls[1][:3] == ["docker", "network", "inspect"]
 
 
 def test_stop_ignores_missing_container(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -279,6 +285,11 @@ def test_start_reviewer_mounts_repository_read_only(
     monkeypatch.setattr(docker, "_image_exists", lambda _image: True)
     monkeypatch.setattr(
         docker,
+        "_ensure_review_isolation",
+        lambda _image: "172.30.50.2",
+    )
+    monkeypatch.setattr(
+        docker,
         "_run",
         lambda args, **_kwargs: calls.append(args) or _proc("container-id\n"),
     )
@@ -296,6 +307,9 @@ def test_start_reviewer_mounts_repository_read_only(
     assert "reviewer" in args
     assert "orch.reviewer=true" in args
     assert "--cap-drop" in args
+    assert docker._REVIEW_NETWORK in args
+    assert "host.docker.internal:172.30.50.2" in args
+    assert "mcp.context7.com:172.30.50.2" in args
     assert f"{tmp_path / 'repo'}:/review:ro" in args
     assert f"{tmp_path / 'out'}:/out" in args
     assert all("/work" not in arg for arg in args)
@@ -339,3 +353,88 @@ def test_exec_in_uses_requested_workdir(
         "/review",
         "reviewer",
     ]
+
+
+def test_ensure_review_isolation_reuses_running_gateway(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(
+        args: list[str],
+        **_kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        if args[:3] == ["docker", "network", "inspect"]:
+            return _proc("true\n")
+        if args[:2] == ["docker", "inspect"]:
+            if "{{.State.Running}}" in args:
+                return _proc("true\n")
+            return _proc("172.30.50.2\n")
+        return _proc()
+
+    monkeypatch.setattr(docker, "_run", fake_run)
+
+    assert docker._ensure_review_isolation("image:latest") == "172.30.50.2"
+    assert not any("create" in call for call in calls)
+    assert any(call[:3] == ["docker", "network", "connect"] for call in calls)
+
+
+def test_ensure_review_network_rejects_a_non_internal_network(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        docker,
+        "_run",
+        lambda *_args, **_kwargs: _proc("false\n"),
+    )
+
+    with pytest.raises(docker.DockerError, match="not internal"):
+        docker._ensure_review_network()
+
+
+def test_ensure_review_isolation_starts_gateway_when_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(
+        args: list[str],
+        **_kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        if args[:3] == ["docker", "network", "inspect"]:
+            return _proc(code=1)
+        if args[:3] == ["docker", "network", "connect"]:
+            return _proc(code=1)
+        if args[:2] == ["docker", "inspect"]:
+            if "{{.State.Running}}" in args:
+                return _proc(code=1)
+            return _proc("172.30.50.3\n")
+        return _proc()
+
+    monkeypatch.setattr(docker, "_run", fake_run)
+
+    assert docker._ensure_review_isolation("image:latest") == "172.30.50.3"
+    assert [
+        "docker",
+        "network",
+        "create",
+        "--label",
+        "orch.managed=true",
+        "--internal",
+        docker._REVIEW_NETWORK,
+    ] in calls
+    gateway_run = next(call for call in calls if call[:3] == ["docker", "run", "-d"])
+    assert "NET_BIND_SERVICE" in gateway_run
+    assert any("orch-review-gateway" in call for call in calls)
+
+
+def test_codegraph_mount_only_when_an_index_exists(tmp_path: Path) -> None:
+    assert docker._codegraph_mount(tmp_path) == []
+    (tmp_path / ".codegraph").mkdir()
+    assert docker._codegraph_mount(tmp_path) == [
+        "-v",
+        f"{tmp_path / '.codegraph'}:/review/.codegraph:ro",
+    ]
+    assert docker._codegraph_mount(tmp_path, enabled=False) == []

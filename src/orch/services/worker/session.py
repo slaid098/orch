@@ -33,9 +33,10 @@ class _SessionRuntime:
         config: Config,
         run_dir: Path,
         watchdog: WatchdogLike | None,
+        mcp_config: Path | None,
     ) -> None:
         self.container = container
-        self.process = _spawn(container, config)
+        self.process = _spawn(container, config, mcp_config)
         self.input_lock = threading.Lock()
         self.result_seen = threading.Event()
         self.activity_at = [time.monotonic()]
@@ -135,6 +136,7 @@ def run_session(
     feedback: CommentFeed | None = None,
     watchdog: WatchdogLike | None = None,
     completion_path: Path | None = None,
+    mcp_config: Path | None = None,
 ) -> SessionResult:
     """Run Claude Code with an open stdin pipe and inject live messages.
 
@@ -147,6 +149,7 @@ def run_session(
         feedback: Optional comment feed to inject while the agent works.
         watchdog: Optional classifier used for nudges and stops.
         completion_path: Optional handoff file that signals task completion.
+        mcp_config: Optional container path to the MCP JSON configuration.
 
     Returns:
         A session result describing why the process ended.
@@ -154,7 +157,13 @@ def run_session(
     Raises:
         AgentError: If the Claude Code process cannot be started.
     """
-    runtime = _SessionRuntime(container, config, run_dir, watchdog)
+    runtime = _SessionRuntime(
+        container,
+        config,
+        run_dir,
+        watchdog,
+        mcp_config,
+    )
     if not runtime.send(prompt):
         runtime.close()
         raise AgentError("Could not send the initial prompt to Claude Code")
@@ -165,8 +174,13 @@ def run_session(
     return runtime.result()
 
 
-def _spawn(container: str, config: Config) -> subprocess.Popen[str]:
-    command = "cd /work && " + claude.build_stream_command(config)
+def _spawn(
+    container: str,
+    config: Config,
+    mcp_config: Path | None,
+) -> subprocess.Popen[str]:
+    mcp_path = "/out/mcp.json" if mcp_config is not None else None
+    command = "cd /work && " + claude.build_stream_command(config, mcp_path)
     try:
         return subprocess.Popen(
             [
@@ -333,7 +347,7 @@ def _close_stdin(process: subprocess.Popen[str]) -> None:
         return
     try:
         process.stdin.close()
-    except (BrokenPipeError, OSError, ValueError):
+    except BrokenPipeError, OSError, ValueError:
         return
 
 
@@ -375,9 +389,7 @@ def _pump_stdout(
                     for normalized in _normalize_event(event):
                         watchdog.observe(normalized)
     except (OSError, ValueError) as ex:
-        log.bind(error_type=type(ex).__name__).warning(
-            "Claude Code stdout reader stopped"
-        )
+        log.bind(error_type=type(ex).__name__).warning("Claude Code stdout reader stopped")
 
 
 def _pump_stderr(stream: Any, stderr_path: Path) -> None:
@@ -387,9 +399,7 @@ def _pump_stderr(stream: Any, stderr_path: Path) -> None:
                 sink.write(line)
                 sink.flush()
     except (OSError, ValueError) as ex:
-        log.bind(error_type=type(ex).__name__).warning(
-            "Claude Code stderr reader stopped"
-        )
+        log.bind(error_type=type(ex).__name__).warning("Claude Code stderr reader stopped")
 
 
 def _watchdog_loop(

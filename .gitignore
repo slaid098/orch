@@ -12,3 +12,4 @@ runs/
 .coverage
 coverage.xml
 htmlcov/
+.codegraph/

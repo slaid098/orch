@@ -14,7 +14,7 @@ from orch.schemas.github.types import Issue, PullRequestStatus
 from orch.schemas.pipeline.types import AttemptSuccess, RunOutcome
 from orch.schemas.reviewer.types import ReviewFinding, ReviewResult
 from orch.services import git as gitops
-from orch.services import github, store
+from orch.services import github, notify, store
 from orch.services.feedback.service import CommentFeed
 from orch.services.pipeline.lifecycle import (
     _STATUS_MERGED,
@@ -96,9 +96,7 @@ def _wait_for_checks(
         now = time.monotonic()
         if now >= deadline:
             if last_status is None:
-                raise ChecksFailed(
-                    f"Could not read GitHub checks before timeout: {last_error}"
-                )
+                raise ChecksFailed(f"Could not read GitHub checks before timeout: {last_error}")
             raise ChecksFailed("GitHub checks did not finish before timeout")
         time.sleep(min(config.checks.poll_seconds, max(1, deadline - now)))
 
@@ -241,6 +239,17 @@ def _park_merge_error(
     attempt: int,
     review_rounds: int,
 ) -> RunOutcome:
+    notify.notify_error(
+        config,
+        stage="merge",
+        error=error,
+        issue_number=issue.number,
+        issue_title=issue.title,
+        run_id=run_id,
+        pr_url=attempt_result.pr_url,
+        attempt=attempt,
+        max_attempts=config.worker.max_attempts,
+    )
     return _park_after_retries(
         config,
         issue,
@@ -267,9 +276,7 @@ def _merge_guard(
         pr_url=attempt_result.pr_url,
         base=config.repo.base_branch,
     ).error("Refusing to auto-merge outside main")
-    return RuntimeError(
-        f"Auto-merge is restricted to main, not {config.repo.base_branch!r}"
-    )
+    return RuntimeError(f"Auto-merge is restricted to main, not {config.repo.base_branch!r}")
 
 
 def _record_merge(
@@ -393,9 +400,7 @@ def _format_findings(findings: tuple[ReviewFinding, ...]) -> str:
         "",
     ]
     for index, finding in enumerate(findings, start=1):
-        lines.append(
-            f"{index}. `{finding.file}:{finding.line}` — {finding.title}"
-        )
+        lines.append(f"{index}. `{finding.file}:{finding.line}` — {finding.title}")
         lines.append(f"   Ситуация: {finding.situation}")
         if finding.fixes:
             lines.append("   Варианты: " + "; ".join(finding.fixes))

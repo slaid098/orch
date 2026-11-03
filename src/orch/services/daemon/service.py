@@ -20,6 +20,9 @@ from orch.services.retention import prune_runs
 
 log = get_logger(component="daemon")
 
+_CLAIM_NOTIFY_SECONDS = 1800
+_claim_notified_at: dict[int, float] = {}
+
 
 def setup_logging(config: Config) -> None:
     """Configure console and rotating file logging.
@@ -66,9 +69,15 @@ def initialize(config: Config) -> str:
                 "orch exhausted its attempts; a human must decide",
             ),
             (config.labels.pr_open, "1d76db", "orch opened a pull request"),
+            (
+                config.labels.hold,
+                "5319e7",
+                "Human hold: orch must not start this issue",
+            ),
         ],
     )
     store.init_db(config.data_dir / "orch.db")
+    notify.flush_pending(config)
     return token
 
 
@@ -86,9 +95,17 @@ def run_once(config: Config, token: str, issue_number: int) -> int:
     try:
         issue = github.get_issue(config.repo.full_name, issue_number, token)
     except GitHubError as ex:
-        log.bind(error=ex, error_type=type(ex).__name__).error(
-            "Could not fetch issue"
+        log.bind(error=ex, error_type=type(ex).__name__).error("Could not fetch issue")
+        notify.notify_error(
+            config,
+            stage="github",
+            error=ex,
+            issue_number=issue_number,
         )
+        return 1
+
+    if config.labels.hold in issue.labels:
+        log.bind(issue=issue.number).warning("Issue is on human hold; refusing to run")
         return 1
 
     if issue.state != "OPEN":
@@ -142,6 +159,7 @@ def run_daemon(config: Config, token: str) -> int:
     prune_runs(config.data_dir, config.retention_days)
     db_path = config.data_dir / "orch.db"
     active: dict[int, Future[RunOutcome]] = {}
+    poll_failed_at: float | None = None
 
     with ThreadPoolExecutor(
         max_workers=config.max_workers,
@@ -158,11 +176,25 @@ def run_daemon(config: Config, token: str) -> int:
                         token,
                     )
                 except GitHubError as ex:
-                    log.bind(error=ex, error_type=type(ex).__name__).error(
-                        "Poll failed; retrying"
-                    )
+                    log.bind(error=ex, error_type=type(ex).__name__).error("Poll failed; retrying")
+                    now = time.monotonic()
+                    if poll_failed_at is None or now - poll_failed_at >= 1800:
+                        notify.notify_error(
+                            config,
+                            stage="daemon-poll",
+                            error=ex,
+                        )
+                        poll_failed_at = now
                     time.sleep(config.poll_interval_seconds)
                     continue
+
+                if poll_failed_at is not None:
+                    notify.notify_recovered(
+                        config,
+                        component="daemon-poll",
+                        detail="GitHub polling works again.",
+                    )
+                    poll_failed_at = None
 
                 _dispatch_issues(
                     issues,
@@ -190,6 +222,9 @@ def _dispatch_issues(
         if len(active) >= config.max_workers:
             break
         if issue.number in active:
+            continue
+        if config.labels.hold in issue.labels:
+            log.bind(issue=issue.number).info("Issue is on human hold; skipping")
             continue
         if store.has_active_run(db_path, config.repo.full_name, issue.number):
             continue
@@ -230,6 +265,12 @@ def _reap_finished(
                 error=ex,
                 error_type=type(ex).__name__,
             ).error("Unhandled issue worker failure")
+            notify.notify_error(
+                config,
+                stage="worker",
+                error=ex,
+                issue_number=issue_number,
+            )
         else:
             log.info(
                 "Issue #{} finished with status {}",
@@ -315,8 +356,20 @@ def _claim_issue(config: Config, issue: github.Issue, token: str) -> bool:
             error=ex,
             error_type=type(ex).__name__,
         ).error("Could not claim issue")
+        now = time.monotonic()
+        last = _claim_notified_at.get(issue.number)
+        if last is None or now - last >= _CLAIM_NOTIFY_SECONDS:
+            notify.notify_error(
+                config,
+                stage="claim",
+                error=ex,
+                issue_number=issue.number,
+                issue_title=issue.title,
+            )
+            _claim_notified_at[issue.number] = now
         return False
     else:
+        _claim_notified_at.pop(issue.number, None)
         return True
 
 
@@ -338,6 +391,11 @@ def _reconcile_startup(config: Config, token: str) -> None:
     except GitHubError as ex:
         log.bind(error=ex, error_type=type(ex).__name__).warning(
             "Could not reconcile running issues"
+        )
+        notify.notify_error(
+            config,
+            stage="startup-reconcile",
+            error=ex,
         )
         return
 
@@ -364,5 +422,12 @@ def _reconcile_startup(config: Config, token: str) -> None:
                 error=ex,
                 error_type=type(ex).__name__,
             ).error("Could not requeue issue after restart")
+            notify.notify_error(
+                config,
+                stage="startup-requeue",
+                error=ex,
+                issue_number=issue.number,
+                issue_title=issue.title,
+            )
         else:
             log.info("Requeued issue #{} after daemon restart", issue.number)

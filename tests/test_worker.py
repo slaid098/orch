@@ -155,6 +155,9 @@ def test_run_worker_success(
     assert any("pytest" in command for command in commands)
     assert any("settings.json" in command for command in commands)
     assert any("--autocompact 200k" in command for command in commands)
+    assert any('--mcp-config "/out/mcp.json"' in command for command in commands)
+    assert any("codegraph" in command for command in commands)
+    assert (run_dir / "mcp.json").exists()
     assert starts[0]["context_tokens"] == 200_000
 
 
