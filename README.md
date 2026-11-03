@@ -190,6 +190,96 @@ A live run needs Docker, an authenticated `gh`, and the worker image built in
 If the smoke test is merged, the issue is closed automatically; otherwise close
 the pull request, branch, and issue when done.
 
+## First production run
+
+Use this checklist for the first controlled run against a real issue. Complete
+[Setup](#setup) first.
+
+1. **Check Docker and the worker image.** Both commands must succeed:
+
+   ```powershell
+   docker info
+   docker image inspect orch-agent:latest
+   ```
+
+   If the image is missing, build it from the repository root:
+
+   ```powershell
+   docker build -f docker/agent.Dockerfile -t orch-agent:latest .
+   ```
+
+   If `worker.image`, or a separately configured `reviewer.image`, uses another
+   tag, inspect that tag instead.
+
+2. **Check the target repository.** The issue must be created in the GitHub
+   repository configured as `repo.owner`/`repo.name`. `orch` talks to GitHub
+   through `gh`; an issue that exists only in Forgejo, or only in a mirror, is
+   not visible to it and the run cannot start.
+
+3. **Create the issue through the project skill.** Follow
+   `.opencode/skills/create-issue`; do not call `gh issue create` directly. Use
+   an English title in `type(scope): description` form. The skill validates the
+   title and body, creates the issue, and adds `agent:queued`. Note the issue
+   number `N`.
+
+4. **Run one issue.** From the repository root, with `GH_TOKEN` set as in
+   [Setup](#setup):
+
+   ```powershell
+   uv run python main.py --issue N --once
+   ```
+
+   `--issue` and `--once` must be used together. Replace `N` with the issue
+   number. This processes exactly that issue and exits; it does not poll for
+   more work.
+
+5. **Confirm each stage in the log.** A successful run prints, in order:
+
+   - `Issue #N attempt 1/3` — the worker started.
+   - `Worker tests passed` — `worker.test_commands` succeeded locally.
+   - `Created pull request: <url>` — the branch was pushed and the PR opened.
+   - `Started reviewer container orch-review-...` — every reported GitHub check
+     is complete and none failed. A failed check logs `Issue attempt failed`;
+     the full `ChecksFailed: ...` text, including the failing check names, is
+     posted as a comment on the issue, and orch starts the next attempt. The
+     reviewer is never started for a red PR. If GitHub reports no checks at
+     all, orch waits for `checks.discovery_seconds` and continues on the local
+     test result.
+   - `Reviewer decision: approved` — the reviewer returned an empty `findings`
+     array. The raw `{"findings": []}` is in the run directory.
+   - `Squash-merged pull request #M` and `Issue #N merged: <url>` — the PR was
+     squash-merged into `main`, and `Closes #N` in its body closes the issue.
+
+   The command then exits with code `0` and prints `Run directory: ...`.
+
+6. **Tell success from `agent:needs-human`.**
+
+   - Success: exit code `0`, the status line `merged: <url>`, the issue is
+     closed, and `result.json` has `"status": "merged"` plus `merge_commit`
+     when GitHub reported it.
+   - Parked: exit code `1`, the status line `Needs human: ...`, the issue
+     carries `agent:needs-human` and a comment with the error and run ID, and
+     `result.json` has `"status": "needs_human"`. The issue stays open; inspect
+     the artifacts and re-queue it only after fixing the cause.
+   - Exit code `0` alone does not prove a merge: with `reviewer.enabled: false`
+     orch stops after green checks, exits `0`, and leaves `result.json` with
+     status `pr_open` for a human to merge.
+
+7. **Find the artifacts.** The printed run directory is
+   `app_data/runs/<owner>__<repo>/issue-N/<run-id>/`. It contains:
+
+   - `result.json` — terminal status, PR URL, merge commit, checks, attempts,
+     and review rounds.
+   - `attempt-<K>/events.jsonl` and `attempt-<K>/events.stderr.log` — the worker
+     Claude Code stream and stderr. `tests.txt`, `diff.patch`, `handoff.json`,
+     and `prompt.md` in the same directory hold the rest of the worker record.
+   - `review-<R>/review-output-1.json` — the raw reviewer JSON;
+     `review-output-2.json` appears only after a repair launch.
+     `review-prompt.md` and `review-schema.json` show what the reviewer was
+     asked.
+   - `app_data/orch.log` — the orchestrator's own DEBUG log, rotated according
+     to `retention_days`.
+
 ## Labels
 
 - `agent:queued` — trigger for the daemon.
