@@ -340,18 +340,24 @@ def _parse_reviewer(raw: dict[str, Any]) -> ReviewerConfig:
 def _parse_mcp(raw: dict[str, Any]) -> McpConfig:
     mcp_raw = _mapping(raw.get("mcp", {}), "mcp")
     enabled = _bool(mcp_raw.get("enabled", True), "mcp.enabled")
+    antidetect = _bool(mcp_raw.get("antidetect", False), "mcp.antidetect")
+    antidetect_url = mcp_raw.get("antidetect_url", "")
+    if not isinstance(antidetect_url, str):
+        raise ConfigError("mcp.antidetect_url must be a string")
+    antidetect_url = antidetect_url.strip()
+    if antidetect:
+        if not antidetect_url:
+            raise ConfigError("mcp.antidetect_url is required when antidetect is enabled")
+        if not antidetect_url.startswith("https://"):
+            raise ConfigError("mcp.antidetect_url must use https://")
     return McpConfig(
         enabled=enabled,
         codegraph=_bool(mcp_raw.get("codegraph", True), "mcp.codegraph"),
         context7=_bool(mcp_raw.get("context7", True), "mcp.context7"),
         playwright=_bool(mcp_raw.get("playwright", True), "mcp.playwright"),
-        antidetect=_bool(mcp_raw.get("antidetect", True), "mcp.antidetect"),
+        antidetect=antidetect,
         context7_url=_optional_str(mcp_raw, "context7_url", "https://mcp.context7.com/mcp"),
-        antidetect_url=_optional_str(
-            mcp_raw,
-            "antidetect_url",
-            "http://80.85.139.21:8765/mcp/",
-        ),
+        antidetect_url=antidetect_url,
         codegraph_command=_optional_str(mcp_raw, "codegraph_command", "codegraph"),
         playwright_command=_optional_str(mcp_raw, "playwright_command", "playwright-mcp"),
     )

@@ -22,7 +22,14 @@ _SECRET_PATTERNS = (
     re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}"),
     re.compile(r"github_pat_[A-Za-z0-9_]+"),
     re.compile(r"Bearer\s+[^\s]+", re.IGNORECASE),
-    re.compile(r"(?i)(token|password|secret|api[_-]?key)\s*[=:]\s*\S+"),
+    re.compile(
+        r"""(?ix)
+        ["']?[\w-]*(?:token|password|secret|api[_-]?key)["']?
+        \s*[:=]\s*
+        (?:"[^"]*"|'[^']*'|[^\s,}]+)
+        """
+    ),
+    re.compile(r"sk-[A-Za-z0-9]{16,}"),
 )
 
 

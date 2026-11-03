@@ -51,7 +51,9 @@ mcp:
   codegraph: true
   context7: true
   playwright: true
-  antidetect: true
+  antidetect: false
+  # Required when antidetect is true; must be an HTTPS endpoint.
+  # antidetect_url: https://browser-mcp.example/mcp/
 
 data_dir: D:/orch/app_data
 retention_days: 7

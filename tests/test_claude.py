@@ -3,7 +3,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from orch.schemas.config.types import Config, LabelsConfig, RepoConfig, WorkerConfig
+from orch.schemas.config.types import (
+    Config,
+    LabelsConfig,
+    McpConfig,
+    RepoConfig,
+    WorkerConfig,
+)
 from orch.services.worker import claude
 
 
@@ -17,6 +23,10 @@ def _config(tmp_path: Path, *, autocompact: str = "200k") -> Config:
             test_commands=("pytest",),
         ),
         data_dir=tmp_path / "app_data",
+        mcp=McpConfig(
+            antidetect=True,
+            antidetect_url="https://browser.example/mcp/",
+        ),
     )
 
 

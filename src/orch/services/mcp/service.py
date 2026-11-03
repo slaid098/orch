@@ -40,7 +40,7 @@ def allowed_tools(config: Config, role: str) -> tuple[str, ...]:
     if role == "worker":
         if config.mcp.playwright:
             tools.append(_PLAYWRIGHT_TOOL)
-        if config.mcp.antidetect:
+        if config.mcp.antidetect and config.mcp.antidetect_url:
             tools.append(_ANTIDETECT_TOOL)
     return tuple(tools)
 
@@ -82,7 +82,7 @@ def _worker_servers(config: Config) -> dict[str, Any]:
         servers["context7"] = _context7(config)
     if config.mcp.playwright:
         servers["playwright"] = _playwright(config)
-    if config.mcp.antidetect:
+    if config.mcp.antidetect and config.mcp.antidetect_url:
         servers["antidetect-browser"] = {
             "type": "http",
             "url": config.mcp.antidetect_url,

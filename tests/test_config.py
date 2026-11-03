@@ -43,6 +43,8 @@ data_dir: data
     assert config.worker.timeout_minutes == 90
     assert config.worker.max_attempts == 3
     assert config.worker.autocompact == "200k"
+    assert config.mcp.antidetect is False
+    assert config.mcp.antidetect_url == ""
     assert config.worker.test_commands == ("uv run pytest -q",)
     assert config.max_workers == 2
     assert config.retention_days == 7
@@ -135,6 +137,40 @@ mcp:
     assert config.mcp.antidetect_url == "http://127.0.0.1:9000/mcp/"
     assert config.mcp.codegraph_command == "cg"
     assert config.mcp.playwright_command == "pw-mcp"
+
+
+@pytest.mark.parametrize(
+    ("url", "message"),
+    [
+        ("", "antidetect_url is required"),
+        ("http://browser.example/mcp/", "must use https"),
+    ],
+)
+def test_load_config_rejects_unsafe_antidetect_url(
+    tmp_path: Path,
+    url: str,
+    message: str,
+) -> None:
+    repo_path = tmp_path / "repo"
+    (repo_path / ".git").mkdir(parents=True)
+    config_path = _write_config(
+        tmp_path,
+        f"""
+repo:
+  owner: slaid098
+  name: orch
+  path: {repo_path.as_posix()}
+worker:
+  test_commands:
+    - pytest
+mcp:
+  antidetect: true
+  antidetect_url: "{url}"
+""",
+    )
+
+    with pytest.raises(ConfigError, match=message):
+        load_config(config_path)
 
 
 @pytest.mark.parametrize(

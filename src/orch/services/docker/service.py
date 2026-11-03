@@ -30,12 +30,21 @@ def _prepare_workspace_dir(workspace_path: Path) -> None:
         ).warning("Could not widen workspace permissions")
 
 
-def _codegraph_mount(repo_path: Path) -> list[str]:
-    """Keep the reviewer checkout read-only while allowing index reads."""
-    index_path = repo_path / ".codegraph"
-    if not index_path.is_dir():
+def _codegraph_mount(repo_path: Path, *, enabled: bool = True) -> list[str]:
+    """Mount a repository-local CodeGraph index read-only for a reviewer."""
+    if not enabled:
         return []
-    return ["-v", f"{index_path}:/review/.codegraph:rw"]
+    index_path = repo_path / ".codegraph"
+    if index_path.is_symlink() or not index_path.is_dir():
+        return []
+    try:
+        root = repo_path.resolve()
+        index = index_path.resolve()
+    except OSError:
+        return []
+    if not index.is_relative_to(root):
+        return []
+    return ["-v", f"{index}:/review/.codegraph:ro"]
 
 
 def _ensure_review_isolation(image: str) -> str:
@@ -54,14 +63,34 @@ def _ensure_review_isolation(image: str) -> str:
 
 def _ensure_review_network() -> None:
     result = _run(
-        ["docker", "network", "inspect", _REVIEW_NETWORK],
+        [
+            "docker",
+            "network",
+            "inspect",
+            "--format",
+            "{{.Internal}}",
+            _REVIEW_NETWORK,
+        ],
         timeout=30,
         check=False,
     )
     if result.returncode == 0:
+        if (result.stdout or "").strip().lower() != "true":
+            raise DockerError(
+                f"Reviewer network {_REVIEW_NETWORK!r} exists but is not internal; "
+                "remove it or let orch recreate it"
+            )
         return
     _run(
-        ["docker", "network", "create", "--internal", _REVIEW_NETWORK],
+        [
+            "docker",
+            "network",
+            "create",
+            "--label",
+            "orch.managed=true",
+            "--internal",
+            _REVIEW_NETWORK,
+        ],
         timeout=60,
     )
     log.info("Created internal reviewer network {}", _REVIEW_NETWORK)
@@ -241,6 +270,7 @@ def start_reviewer(
     run_dir: Path,
     model: str,
     context_tokens: int | None = None,
+    codegraph_enabled: bool = True,
 ) -> str:
     """Start a read-only reviewer container.
 
@@ -251,6 +281,7 @@ def start_reviewer(
         run_dir: Host run directory mounted writable at ``/out``.
         model: Ollama model name passed to Claude Code.
         context_tokens: Context window in tokens, or ``None`` for auto.
+        codegraph_enabled: Whether to expose the repository CodeGraph index.
 
     Returns:
         The container ID.
@@ -280,7 +311,7 @@ def start_reviewer(
         f"mcp.context7.com:{gateway_ip}",
         "-v",
         f"{repo_path}:/review:ro",
-        *_codegraph_mount(repo_path),
+        *_codegraph_mount(repo_path, enabled=codegraph_enabled),
         "-v",
         f"{run_dir}:/out",
         *_worker_env(model, context_tokens),
@@ -428,11 +459,24 @@ def cleanup_managed() -> None:
         _run(["docker", "rm", "-f", container_id], timeout=60, check=False)
     if container_ids:
         log.info("Removed {} orphan worker container(s)", len(container_ids))
-    _run(
-        ["docker", "network", "rm", _REVIEW_NETWORK],
-        timeout=60,
+    label = _run(
+        [
+            "docker",
+            "network",
+            "inspect",
+            "--format",
+            '{{index .Labels "orch.managed"}}',
+            _REVIEW_NETWORK,
+        ],
+        timeout=30,
         check=False,
     )
+    if (label.stdout or "").strip() == "true":
+        _run(
+            ["docker", "network", "rm", _REVIEW_NETWORK],
+            timeout=60,
+            check=False,
+        )
 
 
 def stop(name: str) -> None:

@@ -63,6 +63,15 @@ def _proc(
     return subprocess.CompletedProcess(["claude"], code, stdout, stderr)
 
 
+def test_container_name_includes_unique_run_identity(tmp_path: Path) -> None:
+    first = tmp_path / "run-a" / "review-1" / "quality"
+    second = tmp_path / "run-b" / "review-1" / "quality"
+
+    assert reviewer._container_name(first, "quality", 1) != reviewer._container_name(
+        second, "quality", 1
+    )
+
+
 def _prepare_review(tmp_path: Path) -> tuple[Path, Path, Path]:
     run_dir = tmp_path / "run" / "review-1"
     workspace = tmp_path / "workspace"
@@ -206,6 +215,7 @@ def test_run_review_approves_and_records_output(
     assert starts[0]["image"] == "reviewer:latest"
     assert starts[0]["model"] == "reviewer-model"
     assert starts[0]["context_tokens"] == 200_000
+    assert starts[0]["codegraph_enabled"] is True
     assert "--permission-mode plan" in commands[0]
     assert "Read,Grep,Glob" in commands[0]
     assert "mcp__codegraph__codegraph_explore" in commands[0]

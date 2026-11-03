@@ -385,7 +385,11 @@ def test_notify_error_redacts_secrets(
     assert notify_error(
         _enabled_config(tmp_path),
         stage="reviewer",
-        error="Bearer abc123 ghp_abcdefghijklmnopqrstuvwxyz",
+        error=(
+            "Bearer abc123 ghp_abcdefghijklmnopqrstuvwxyz "
+            '{"token": "json-token-value", '
+            "\"api_key\": 'json-api-key-value'}"
+        ),
         issue_number=7,
         issue_title="Fix bug",
         run_id="run-7",
@@ -399,6 +403,8 @@ def test_notify_error_redacts_secrets(
     assert "🔁 попытка: 1/2" in text
     assert "Bearer abc123" not in text
     assert "ghp_abcdefghijklmnopqrstuvwxyz" not in text
+    assert "json-token-value" not in text
+    assert "json-api-key-value" not in text
     assert "[redacted]" in text
 
 

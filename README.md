@@ -181,7 +181,8 @@ separate browser bundle. Python Playwright calls must pass
 `executable_path="/usr/bin/chromium"`; the generated MCP config already does.
 Claude Code receives a per-container `mcp.json`;
 CodeGraph and Context7 are available to both roles, while Playwright and
-antidetect-browser stay worker-only.
+antidetect-browser stay worker-only. Antidetect is opt-in: set
+`mcp.antidetect: true` and provide an HTTPS `mcp.antidetect_url`.
 
 Create the issue on GitHub and add the `agent:queued` label. Add `agent:hold`
 at any time before dispatch to keep orch away from the issue. Run the daemon:
@@ -369,8 +370,9 @@ Feature flags:
 - `checks.*` — GitHub check polling timeout, interval, and the grace period for
   checks to appear after a PR is opened.
 - `mcp.*` — enable or disable CodeGraph, Context7, Playwright, and
-  antidetect-browser and override their URLs/commands. Reviewers always exclude
-  the worker-only servers.
+  antidetect-browser and override their URLs/commands. Antidetect is disabled
+  by default and requires an explicit HTTPS `antidetect_url`. Reviewers always
+  exclude the worker-only servers.
 - `labels.hold` — human hold label (default `agent:hold`). A held issue is
   skipped by dispatch and by the one-shot runner.
 

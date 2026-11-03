@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -362,6 +363,7 @@ def _run_launch(
             run_dir=run_dir,
             model=model,
             context_tokens=autocompact_tokens(config.reviewer.autocompact),
+            codegraph_enabled=config.mcp.enabled and config.mcp.codegraph,
         )
     except Exception as ex:
         raise ReviewerError(f"Could not start reviewer container: {ex}") from ex
@@ -509,5 +511,6 @@ def _positive_int(value: object, name: str) -> int:
 
 
 def _container_name(run_dir: Path, role: str, launch: int) -> str:
-    name = (f"orch-review-{run_dir.parent.name}-{role}-{launch}").lower()
+    identity = hashlib.sha1(str(run_dir.resolve()).encode("utf-8")).hexdigest()[:12]
+    name = f"orch-review-{identity}-{role}-{launch}".lower()
     return "".join(char if char.isalnum() or char in "-_." else "-" for char in name)[:63]

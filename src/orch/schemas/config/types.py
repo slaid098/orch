@@ -115,9 +115,9 @@ class McpConfig:
     codegraph: bool = True
     context7: bool = True
     playwright: bool = True
-    antidetect: bool = True
+    antidetect: bool = False
     context7_url: str = "https://mcp.context7.com/mcp"
-    antidetect_url: str = "http://80.85.139.21:8765/mcp/"
+    antidetect_url: str = ""
     codegraph_command: str = "codegraph"
     playwright_command: str = "playwright-mcp"
 
