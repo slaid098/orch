@@ -1,8 +1,6 @@
 """Worker exceptions."""
 
-
-class AgentError(RuntimeError):
-    """Raised when the worker cannot produce a usable result."""
+from orch.exceptions.agent import AgentError
 
 
 class RunCancelled(AgentError):
@@ -11,3 +9,6 @@ class RunCancelled(AgentError):
 
 class WatchdogStop(AgentError):
     """Raised when the watchdog decides that the run must stop."""
+
+
+__all__ = ["AgentError", "RunCancelled", "WatchdogStop"]

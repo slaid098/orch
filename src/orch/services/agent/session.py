@@ -1,4 +1,4 @@
-"""Long-lived Claude Code stream-json session for one worker attempt."""
+"""Long-lived Claude Code stream-json session shared by agent roles."""
 
 from __future__ import annotations
 
@@ -10,15 +10,14 @@ import time
 from pathlib import Path
 from typing import Any
 
-import orch.services.worker.claude as claude
 from orch.config.logger import get_logger
-from orch.exceptions.worker import AgentError
+from orch.exceptions.agent import AgentError
+from orch.schemas.agent.types import SessionResult, WatchdogLike
 from orch.schemas.config.types import Config
-from orch.schemas.worker.types import SessionResult, WatchdogLike
 from orch.services.docker import stop as stop_container
 from orch.services.feedback.service import CommentFeed
 
-log = get_logger(component="worker.session")
+log = get_logger(component="agent.session")
 
 _POLL_SECONDS = 0.25
 _CLOSE_GRACE_SECONDS = 10.0
@@ -33,10 +32,13 @@ class _SessionRuntime:
         config: Config,
         run_dir: Path,
         watchdog: WatchdogLike | None,
-        mcp_config: Path | None,
+        command: str,
+        workdir: str,
+        events_name: str,
+        stderr_name: str,
     ) -> None:
         self.container = container
-        self.process = _spawn(container, config, mcp_config)
+        self.process = _spawn(container, command, workdir)
         self.input_lock = threading.Lock()
         self.result_seen = threading.Event()
         self.activity_at = [time.monotonic()]
@@ -55,7 +57,7 @@ class _SessionRuntime:
             target=_pump_stdout,
             args=(
                 self.process.stdout,
-                run_dir / "events.jsonl",
+                run_dir / events_name,
                 self.result_seen,
                 self.activity_at,
                 self.result_at,
@@ -66,7 +68,7 @@ class _SessionRuntime:
         )
         self.stderr_thread = threading.Thread(
             target=_pump_stderr,
-            args=(self.process.stderr, run_dir / "events.stderr.log"),
+            args=(self.process.stderr, run_dir / stderr_name),
             name="orch-claude-stderr",
             daemon=True,
         )
@@ -133,23 +135,29 @@ def run_session(
     prompt: str,
     deadline: float,
     *,
+    command: str,
+    workdir: str = "/work",
     feedback: CommentFeed | None = None,
     watchdog: WatchdogLike | None = None,
     completion_path: Path | None = None,
-    mcp_config: Path | None = None,
+    events_name: str = "events.jsonl",
+    stderr_name: str = "events.stderr.log",
 ) -> SessionResult:
-    """Run Claude Code with an open stdin pipe and inject live messages.
+    """Run one Claude Code stream-json session inside an agent container.
 
     Args:
-        container: Running worker container name.
+        container: Running agent container name.
         config: Orchestrator configuration.
         run_dir: Host directory mounted at ``/out``.
         prompt: Initial user prompt.
         deadline: Monotonic deadline for the whole attempt.
+        command: Claude Code command executed in ``workdir``.
+        workdir: Container working directory.
         feedback: Optional comment feed to inject while the agent works.
         watchdog: Optional classifier used for nudges and stops.
         completion_path: Optional handoff file that signals task completion.
-        mcp_config: Optional container path to the MCP JSON configuration.
+        events_name: Name of the streamed JSONL event log in ``run_dir``.
+        stderr_name: Name of the stderr log in ``run_dir``.
 
     Returns:
         A session result describing why the process ended.
@@ -162,7 +170,10 @@ def run_session(
         config,
         run_dir,
         watchdog,
-        mcp_config,
+        command,
+        workdir,
+        events_name,
+        stderr_name,
     )
     if not runtime.send(prompt):
         runtime.close()
@@ -176,11 +187,9 @@ def run_session(
 
 def _spawn(
     container: str,
-    config: Config,
-    mcp_config: Path | None,
+    command: str,
+    workdir: str,
 ) -> subprocess.Popen[str]:
-    mcp_path = "/out/mcp.json" if mcp_config is not None else None
-    command = "cd /work && " + claude.build_stream_command(config, mcp_path)
     try:
         return subprocess.Popen(
             [
@@ -190,11 +199,11 @@ def _spawn(
                 "-u",
                 "agent",
                 "-w",
-                "/work",
+                workdir,
                 container,
                 "bash",
                 "-lc",
-                command,
+                f"cd {workdir} && {command}",
             ],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
@@ -358,7 +367,7 @@ def _stop(container: str) -> None:
         log.bind(
             container=container,
             error_type=type(ex).__name__,
-        ).warning("Could not stop the worker container")
+        ).warning("Could not stop the agent container")
 
 
 def _pump_stdout(

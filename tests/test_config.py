@@ -6,6 +6,7 @@ import pytest
 
 from orch.config.settings import load_config
 from orch.exceptions.config import ConfigError
+from orch.schemas.config.types import Config
 
 
 def _write_config(tmp_path: Path, body: str) -> Path:
@@ -56,7 +57,7 @@ data_dir: data
     assert config.reviewer.enabled
     assert config.reviewer.image is None
     assert config.reviewer.model is None
-    assert config.reviewer.timeout_minutes == 15
+    assert config.reviewer.timeout_minutes == 30
     assert config.reviewer.max_rounds == 3
     assert config.reviewer.autocompact == "200k"
     assert config.reviewer.allowed_tools == "Read,Grep,Glob"
@@ -171,6 +172,76 @@ mcp:
 
     with pytest.raises(ConfigError, match=message):
         load_config(config_path)
+
+
+def _load_config_with_antidetect_url(tmp_path: Path, url: str) -> Config:
+    repo_path = tmp_path / "repo"
+    (repo_path / ".git").mkdir(parents=True)
+    config_path = _write_config(
+        tmp_path,
+        f"""
+repo:
+  owner: slaid098
+  name: orch
+  path: {repo_path.as_posix()}
+worker:
+  test_commands:
+    - pytest
+mcp:
+  antidetect: true
+  antidetect_url: "{url}"
+""",
+    )
+    return load_config(config_path)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://host.docker.internal:8765/mcp/",
+        "http://localhost:8765/mcp/",
+        "http://127.0.0.1:8765/mcp/",
+        "http://192.168.1.10:8765/mcp/",
+        "http://10.0.0.5:8765/mcp/",
+        "http://[::1]:8765/mcp/",
+        "http://[fd00::1]:8765/mcp/",
+    ],
+)
+def test_load_config_accepts_local_antidetect_http_url(tmp_path: Path, url: str) -> None:
+    config = _load_config_with_antidetect_url(tmp_path, url)
+
+    assert config.mcp.antidetect
+    assert config.mcp.antidetect_url == url
+
+
+def test_load_config_accepts_https_antidetect_url(tmp_path: Path) -> None:
+    url = "https://browser.example/mcp/"
+
+    config = _load_config_with_antidetect_url(tmp_path, url)
+
+    assert config.mcp.antidetect_url == url
+
+
+@pytest.mark.parametrize(
+    ("url", "message"),
+    [
+        ("http://80.85.139.21:8765/mcp/", "must use https"),
+        ("http://browser.example/mcp/", "must use https"),
+        ("ftp://browser.example/mcp/", "http:// or https://"),
+        ("browser.example/mcp/", "http:// or https://"),
+        ("https://", "include a host"),
+        ("https:///mcp/", "include a host"),
+        ("https://user:secret@browser.example/mcp/", "credentials"),
+        ("https://browser.example:notaport/mcp/", "valid port"),
+    ],
+)
+def test_load_config_rejects_invalid_antidetect_url(
+    tmp_path: Path,
+    url: str,
+    message: str,
+) -> None:
+    with pytest.raises(ConfigError, match=message):
+        _load_config_with_antidetect_url(tmp_path, url)
 
 
 @pytest.mark.parametrize(

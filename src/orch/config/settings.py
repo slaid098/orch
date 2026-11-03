@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import yaml
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -321,7 +323,7 @@ def _parse_reviewer(raw: dict[str, Any]) -> ReviewerConfig:
         image=_nullable_str(reviewer_raw, "image", "reviewer.image"),
         model=_nullable_str(reviewer_raw, "model", "reviewer.model"),
         timeout_minutes=_bounded_int(
-            reviewer_raw.get("timeout_minutes", 15),
+            reviewer_raw.get("timeout_minutes", 30),
             "reviewer.timeout_minutes",
             minimum=1,
             maximum=60,
@@ -348,8 +350,7 @@ def _parse_mcp(raw: dict[str, Any]) -> McpConfig:
     if antidetect:
         if not antidetect_url:
             raise ConfigError("mcp.antidetect_url is required when antidetect is enabled")
-        if not antidetect_url.startswith("https://"):
-            raise ConfigError("mcp.antidetect_url must use https://")
+        antidetect_url = _validated_antidetect_url(antidetect_url)
     return McpConfig(
         enabled=enabled,
         codegraph=_bool(mcp_raw.get("codegraph", True), "mcp.codegraph"),
@@ -361,6 +362,61 @@ def _parse_mcp(raw: dict[str, Any]) -> McpConfig:
         codegraph_command=_optional_str(mcp_raw, "codegraph_command", "codegraph"),
         playwright_command=_optional_str(mcp_raw, "playwright_command", "playwright-mcp"),
     )
+
+
+_LOCAL_HTTP_HOSTS = frozenset({"localhost", "host.docker.internal"})
+
+
+def _validated_antidetect_url(url: str) -> str:
+    """Validate the antidetect MCP endpoint.
+
+    Args:
+        url: Endpoint URL taken from ``mcp.antidetect_url``.
+
+    Returns:
+        The unchanged URL when it is safe to use.
+
+    Raises:
+        ConfigError: If the URL is malformed, carries embedded credentials, or
+            uses plaintext HTTP towards a public host.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        raise ConfigError("mcp.antidetect_url must be an http:// or https:// URL")
+    if parsed.username or parsed.password:
+        raise ConfigError("mcp.antidetect_url must not contain embedded credentials")
+    if not parsed.hostname:
+        raise ConfigError("mcp.antidetect_url must include a host")
+    try:
+        _ = parsed.port
+    except ValueError as ex:
+        raise ConfigError("mcp.antidetect_url must include a valid port") from ex
+    if parsed.scheme == "https" or _is_local_host(parsed.hostname):
+        return url
+    raise ConfigError(
+        "mcp.antidetect_url must use https:// for public hosts; plaintext http "
+        f"is allowed only for local addresses, got {parsed.hostname}"
+    )
+
+
+def _is_local_host(host: str) -> bool:
+    """Return whether a host is local or private enough for plaintext HTTP.
+
+    Args:
+        host: Hostname or IP address to check.
+
+    Returns:
+        True for loopback, ``localhost``, ``host.docker.internal``, private
+        IPv4 ranges, and IPv6 unique-local or loopback addresses.
+    """
+    name = host.lower().rstrip(".")
+    if name in _LOCAL_HTTP_HOSTS:
+        return True
+    try:
+        address = ipaddress.ip_address(name)
+    except ValueError:
+        return False
+    return address.is_loopback or address.is_private
 
 
 def _resolve_telegram_token(token_file: Path | None) -> str | None:

@@ -182,7 +182,9 @@ separate browser bundle. Python Playwright calls must pass
 Claude Code receives a per-container `mcp.json`;
 CodeGraph and Context7 are available to both roles, while Playwright and
 antidetect-browser stay worker-only. Antidetect is opt-in: set
-`mcp.antidetect: true` and provide an HTTPS `mcp.antidetect_url`.
+`mcp.antidetect: true` and provide its `mcp.antidetect_url`. Public endpoints
+must use HTTPS; plain HTTP is accepted only for local or private addresses such
+as `host.docker.internal`, `localhost`, loopback, and RFC1918 hosts.
 
 Create the issue on GitHub and add the `agent:queued` label. Add `agent:hold`
 at any time before dispatch to keep orch away from the issue. Run the daemon:
@@ -354,8 +356,9 @@ the model. `orch.yaml` and `app_data/` are ignored by git.
 The base branch is fetched into a local bare mirror under `data_dir`; the worker
 never receives a GitHub token and never fetches from GitHub directly.
 `reviewer.image` and `reviewer.model` fall back to the worker image and model
-when omitted. The reviewer timeout should stay in the 10–15 minute range because
-a full repository review can be slow.
+when omitted. Reviewers are read-only and usually finish in about 7–8 minutes;
+the default 30-minute timeout is a safety cap, while the worker keeps its longer
+90-minute budget for implementation and tests.
 
 Feature flags:
 
@@ -371,8 +374,8 @@ Feature flags:
   checks to appear after a PR is opened.
 - `mcp.*` — enable or disable CodeGraph, Context7, Playwright, and
   antidetect-browser and override their URLs/commands. Antidetect is disabled
-  by default and requires an explicit HTTPS `antidetect_url`. Reviewers always
-  exclude the worker-only servers.
+  by default; when enabled, public URLs must use HTTPS, while local/private
+  addresses may use HTTP. Reviewers always exclude the worker-only servers.
 - `labels.hold` — human hold label (default `agent:hold`). A held issue is
   skipped by dispatch and by the one-shot runner.
 
@@ -381,7 +384,9 @@ Feature flags:
 `worker.autocompact` pins the Claude Code context window. The default `200k`
 writes the same value to the CLI flag, the container environment, and
 `~/.claude/settings.json` inside the worker, so every agent that runs there
-inherits it. `auto` leaves the window to Claude Code.
+inherits it. `reviewer.autocompact` applies the same setting to reviewer
+containers; both roles use `200k` so the shared model and image behave
+consistently. `auto` leaves the window to Claude Code.
 
 `retention_days` (default 7) removes old run directories and rotated logs, so
 local artifacts never grow without bound. Rotation happens at daemon startup
