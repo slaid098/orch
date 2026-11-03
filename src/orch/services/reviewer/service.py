@@ -393,14 +393,15 @@ def _command(config: Config, mcp_path: Path | None) -> str:
     if mcp_path is not None:
         mcp_flags = "--mcp-config /out/mcp.json --strict-mcp-config "
     return (
-        'cd /review && claude -p "$(cat /out/review-prompt.md)" '
+        "cd /review && claude -p "
         "--permission-mode plan "
         "--permission-prompts none "
         f'--allowedTools "{allowed}" '
         f"{mcp_flags}"
         f"--autocompact {reviewer.autocompact} "
         f'--model "{reviewer.model or config.worker.model}" '
-        '--json-schema "$(cat /out/review-schema.json)"'
+        '--json-schema "$(cat /out/review-schema.json)" '
+        "< /out/review-prompt.md"
     )
 
 

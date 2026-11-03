@@ -213,6 +213,8 @@ def test_run_review_approves_and_records_output(
     assert "--mcp-config /out/mcp.json --strict-mcp-config" in commands[0]
     assert (run_dir / "quality" / "mcp.json").exists()
     assert "--json-schema" in commands[0]
+    assert "< /out/review-prompt.md" in commands[0]
+    assert '"$(cat /out/review-prompt.md)"' not in commands[0]
     assert "GH_TOKEN" not in commands[0]
     assert len(stops) == 1
     assert stops[0].startswith("orch-review-")

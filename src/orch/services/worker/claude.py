@@ -30,7 +30,7 @@ def build_command(config: Config, mcp_config: str | None = None) -> str:
     """
     worker = config.worker
     return (
-        'claude -p "$(cat /out/prompt.md)" '
+        "claude -p "
         "--output-format stream-json "
         "--verbose "
         "--permission-mode bypassPermissions "
@@ -38,7 +38,8 @@ def build_command(config: Config, mcp_config: str | None = None) -> str:
         f'--allowedTools "{_allowed_tools(config)}" '
         f"{_mcp_flags(mcp_config)}"
         f"--autocompact {worker.autocompact} "
-        f'--model "{worker.model}"'
+        f'--model "{worker.model}" '
+        "< /out/prompt.md"
     )
 
 

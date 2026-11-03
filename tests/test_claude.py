@@ -35,6 +35,8 @@ def test_build_command_pins_window_and_model(tmp_path: Path) -> None:
     assert "--autocompact 150k" in command
     assert '--model "deepseek-v4.1-flash:cloud"' in command
     assert "--output-format stream-json" in command
+    assert "< /out/prompt.md" in command
+    assert '"$(cat /out/prompt.md)"' not in command
 
 
 def test_build_command_adds_mcp_flags_and_tools(tmp_path: Path) -> None:
