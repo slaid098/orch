@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -13,9 +14,11 @@ from orch.exceptions.reviewer import ReviewerError
 from orch.schemas.config.types import Config
 from orch.schemas.github.types import Issue
 from orch.schemas.reviewer.types import ReviewFinding, ReviewResult
-from orch.services.docker import exec_in, start_reviewer, stop
+from orch.services.agent import run_session
+from orch.services.docker import start_reviewer, stop
 from orch.services.mcp import allowed_tools as mcp_allowed_tools
 from orch.services.mcp import write_reviewer_config
+from orch.services.watchdog.service import Watchdog
 from orch.services.worker import autocompact_tokens
 
 log = get_logger(component="reviewer")
@@ -266,6 +269,7 @@ def _run_role(
         try:
             result = _review_launch(
                 config,
+                issue,
                 workspace_path,
                 prompt=prompt,
                 last_error=last_error,
@@ -310,6 +314,7 @@ def _run_role(
 
 def _review_launch(
     config: Config,
+    issue: Issue,
     workspace_path: Path,
     *,
     prompt: str,
@@ -324,8 +329,10 @@ def _review_launch(
     _write_text(role_dir / "review-prompt.md", launch_prompt)
     raw = _run_launch(
         config,
+        issue,
         role_dir,
         workspace_path,
+        prompt=launch_prompt,
         timeout=timeout,
         launch=launch,
         role=role,
@@ -344,9 +351,11 @@ def _read_diff(diff_path: Path) -> str:
 
 def _run_launch(
     config: Config,
+    issue: Issue,
     run_dir: Path,
     workspace_path: Path,
     *,
+    prompt: str,
     timeout: int,
     launch: int,
     role: str,
@@ -355,6 +364,8 @@ def _run_launch(
     container = _container_name(run_dir, role, launch)
     image = config.reviewer.image or config.worker.image
     model = config.reviewer.model or config.worker.model
+    events_name = f"events-{launch}.jsonl"
+    stderr_name = f"events-{launch}.stderr.log"
     try:
         start_reviewer(
             image=image,
@@ -368,22 +379,46 @@ def _run_launch(
     except Exception as ex:
         raise ReviewerError(f"Could not start reviewer container: {ex}") from ex
 
+    watchdog = (
+        Watchdog(
+            config.watchdog,
+            issue_number=issue.number,
+            issue_title=f"{issue.title} ({role} reviewer)",
+            workspace_path=workspace_path,
+        )
+        if config.watchdog.enabled
+        else None
+    )
     try:
-        result = exec_in(
+        result = run_session(
             container,
-            _command(config, mcp_path),
-            timeout=timeout,
+            config,
+            run_dir,
+            prompt,
+            time.monotonic() + timeout,
+            command=_command(config, mcp_path),
             workdir="/review",
+            watchdog=watchdog,
+            events_name=events_name,
+            stderr_name=stderr_name,
         )
     except Exception as ex:
         raise ReviewerError(f"Could not execute reviewer: {ex}") from ex
     finally:
         stop(container)
 
+    if result.timed_out:
+        raise ReviewerError(
+            f"reviewer timed out after {timeout}s: {_last_event(role_dir=run_dir, name=events_name)}"
+        )
+    if result.stopped_by_watchdog:
+        raise ReviewerError(
+            "watchdog stopped reviewer: " + (result.watchdog_reason or "unknown reason")
+        )
     if result.returncode != 0:
-        details = (result.stderr or result.stdout or "").strip()
-        raise ReviewerError(f"reviewer exited with {result.returncode}: {details[-2000:]}")
-    return (result.stdout or "").strip()
+        details = _read_tail(run_dir / stderr_name)
+        raise ReviewerError(f"reviewer exited with {result.returncode}: {details}")
+    return _final_review_text(run_dir / events_name)
 
 
 def _command(config: Config, mcp_path: Path | None) -> str:
@@ -395,16 +430,68 @@ def _command(config: Config, mcp_path: Path | None) -> str:
     if mcp_path is not None:
         mcp_flags = "--mcp-config /out/mcp.json --strict-mcp-config "
     return (
-        "cd /review && claude -p "
+        "claude -p "
+        "--input-format stream-json "
+        "--output-format stream-json "
+        "--verbose "
         "--permission-mode plan "
         "--permission-prompts none "
         f'--allowedTools "{allowed}" '
         f"{mcp_flags}"
         f"--autocompact {reviewer.autocompact} "
         f'--model "{reviewer.model or config.worker.model}" '
-        '--json-schema "$(cat /out/review-schema.json)" '
-        "< /out/review-prompt.md"
+        '--json-schema "$(cat /out/review-schema.json)"'
     )
+
+
+def _final_review_text(events_path: Path) -> str:
+    final_event: dict[str, Any] | None = None
+    try:
+        lines = events_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError as ex:
+        raise ReviewerError(f"Could not read reviewer events: {events_path}") from ex
+    for line in lines:
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict) and event.get("type") == "result":
+            final_event = event
+    if final_event is None:
+        raise ReviewerError("reviewer produced no final result event")
+    if final_event.get("is_error"):
+        raise ReviewerError(
+            "reviewer result is an error: "
+            + str(final_event.get("subtype") or final_event.get("result") or "unknown")
+        )
+    structured = final_event.get("structured_output")
+    if isinstance(structured, (dict, list)):
+        return json.dumps(structured, ensure_ascii=False)
+    if isinstance(structured, str) and structured.strip():
+        return structured.strip()
+    result = final_event.get("result")
+    if isinstance(result, (dict, list)):
+        return json.dumps(result, ensure_ascii=False)
+    if isinstance(result, str) and result.strip():
+        return result.strip()
+    raise ReviewerError("reviewer final event did not contain JSON output")
+
+
+def _read_tail(path: Path) -> str:
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return ""
+    return text[-2000:]
+
+
+def _last_event(*, role_dir: Path, name: str) -> str:
+    path = role_dir / name
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return "no events"
+    return (lines[-1] if lines else "no events")[-500:]
 
 
 def parse_review(raw: str) -> ReviewResult:

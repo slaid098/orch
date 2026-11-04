@@ -2,16 +2,20 @@ from __future__ import annotations
 
 import json
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
+from orch.exceptions.agent import AgentError
 from orch.exceptions.reviewer import ReviewerError
+from orch.schemas.agent.types import SessionResult
 from orch.schemas.config.types import (
     Config,
     LabelsConfig,
     RepoConfig,
     ReviewerConfig,
+    WatchdogConfig,
     WorkerConfig,
 )
 from orch.schemas.github.types import Issue
@@ -89,28 +93,98 @@ def _patch_reviewer(
     starts: list[dict[str, object]] = []
     commands: list[str] = []
     stops: list[str] = []
+    final_texts = [output.stdout.strip() for output in outputs]
 
     def start(**kwargs: object) -> str:
         starts.append(kwargs)
         return "container"
 
     def execute(
-        name: str,
-        command: str,
+        _container: str,
+        _config: Config,
+        run_dir: Path,
+        _prompt: str,
+        _deadline: float,
         *,
-        timeout: int,
-        workdir: str,
-    ) -> subprocess.CompletedProcess[str]:
-        del name, timeout, workdir
+        command: str,
+        **_kwargs: object,
+    ) -> SessionResult:
         commands.append(command)
         if not outputs:
             pytest.fail("unexpected reviewer launch")
-        return outputs.pop(0)
+        output = outputs.pop(0)
+        stderr_name = str(_kwargs.get("stderr_name", "events.stderr.log"))
+        (run_dir / stderr_name).write_text(output.stderr, encoding="utf-8")
+        return SessionResult(returncode=output.returncode)
+
+    def final_text(_path: Path) -> str:
+        if not final_texts:
+            pytest.fail("unexpected final output read")
+        return final_texts.pop(0)
 
     monkeypatch.setattr(reviewer, "start_reviewer", start)
-    monkeypatch.setattr(reviewer, "exec_in", execute)
+    monkeypatch.setattr(reviewer, "run_session", execute)
+    monkeypatch.setattr(reviewer, "_final_review_text", final_text)
     monkeypatch.setattr(reviewer, "stop", lambda name: stops.append(name))
     return starts, commands, stops
+
+
+def test_final_review_text_reads_structured_output(tmp_path: Path) -> None:
+    events = tmp_path / "events-1.jsonl"
+    events.write_text(
+        '{"type":"assistant","message":{"content":[]}}\n'
+        '{"type":"result","structured_output":{"findings":[]}}\n',
+        encoding="utf-8",
+    )
+
+    raw = reviewer._final_review_text(events)
+
+    assert json.loads(raw) == {"findings": []}
+
+
+def test_final_review_text_reads_result_string(tmp_path: Path) -> None:
+    events = tmp_path / "events-1.jsonl"
+    events.write_text(
+        'not json\n{"type":"result","result":"{\\"findings\\": []}"}\n',
+        encoding="utf-8",
+    )
+
+    assert json.loads(reviewer._final_review_text(events)) == {"findings": []}
+
+
+def test_final_review_text_rejects_error_result(tmp_path: Path) -> None:
+    events = tmp_path / "events-1.jsonl"
+    events.write_text(
+        '{"type":"result","is_error":true,"subtype":"error_during_execution"}\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ReviewerError, match="result is an error"):
+        reviewer._final_review_text(events)
+
+
+@pytest.mark.parametrize(
+    ("content", "message"),
+    [
+        ("", "no final result"),
+        ('{"type":"result","result":""}', "did not contain"),
+    ],
+)
+def test_final_review_text_rejects_missing_payload(
+    tmp_path: Path,
+    content: str,
+    message: str,
+) -> None:
+    events = tmp_path / "events-1.jsonl"
+    events.write_text(content, encoding="utf-8")
+
+    with pytest.raises(ReviewerError, match=message):
+        reviewer._final_review_text(events)
+
+
+def test_final_review_text_rejects_unreadable_events(tmp_path: Path) -> None:
+    with pytest.raises(ReviewerError, match="Could not read reviewer events"):
+        reviewer._final_review_text(tmp_path / "missing.jsonl")
 
 
 def test_parse_review_approves_empty_findings() -> None:
@@ -216,6 +290,9 @@ def test_run_review_approves_and_records_output(
     assert starts[0]["model"] == "reviewer-model"
     assert starts[0]["context_tokens"] == 200_000
     assert starts[0]["codegraph_enabled"] is True
+    assert "--input-format stream-json" in commands[0]
+    assert "--output-format stream-json" in commands[0]
+    assert "--verbose" in commands[0]
     assert "--permission-mode plan" in commands[0]
     assert "Read,Grep,Glob" in commands[0]
     assert "mcp__codegraph__codegraph_explore" in commands[0]
@@ -223,8 +300,7 @@ def test_run_review_approves_and_records_output(
     assert "--mcp-config /out/mcp.json --strict-mcp-config" in commands[0]
     assert (run_dir / "quality" / "mcp.json").exists()
     assert "--json-schema" in commands[0]
-    assert "< /out/review-prompt.md" in commands[0]
-    assert '"$(cat /out/review-prompt.md)"' not in commands[0]
+    assert "< /out/review-prompt.md" not in commands[0]
     assert "GH_TOKEN" not in commands[0]
     assert len(stops) == 1
     assert stops[0].startswith("orch-review-")
@@ -246,12 +322,14 @@ def test_run_review_repairs_invalid_json_once(
         prompts.append(prompt)
         return "container"
 
+    outputs = iter(["not json", '{"findings": []}'])
+
+    def execute(*_args: object, **_kwargs: object) -> SessionResult:
+        return SessionResult(returncode=0)
+
     monkeypatch.setattr(reviewer, "start_reviewer", start)
-    monkeypatch.setattr(
-        reviewer,
-        "exec_in",
-        lambda *_args, **_kwargs: _proc('{"findings": []}' if len(prompts) == 2 else "not json"),
-    )
+    monkeypatch.setattr(reviewer, "run_session", execute)
+    monkeypatch.setattr(reviewer, "_final_review_text", lambda _path: next(outputs))
     monkeypatch.setattr(reviewer, "stop", lambda _name: None)
 
     result = reviewer.run_review(
@@ -318,9 +396,10 @@ def test_run_review_retries_a_technical_failure(
     monkeypatch.setattr(reviewer, "start_reviewer", start)
     monkeypatch.setattr(
         reviewer,
-        "exec_in",
-        lambda *_args, **_kwargs: _proc('{"findings": []}'),
+        "run_session",
+        lambda *_args, **_kwargs: SessionResult(returncode=0),
     )
+    monkeypatch.setattr(reviewer, "_final_review_text", lambda _path: '{"findings": []}')
     monkeypatch.setattr(reviewer, "stop", lambda _name: None)
 
     result = reviewer.run_review(
@@ -373,8 +452,8 @@ def test_run_review_stops_container_when_execution_fails(
     monkeypatch.setattr(reviewer, "start_reviewer", lambda **_kwargs: "container")
     monkeypatch.setattr(
         reviewer,
-        "exec_in",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("exec failed")),
+        "run_session",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AgentError("exec failed")),
     )
     monkeypatch.setattr(reviewer, "stop", lambda name: stops.append(name))
 
@@ -419,6 +498,118 @@ def test_run_review_raises_when_diff_is_missing(
             checks_summary="pytest: success",
             roles=("quality",),
         )
+
+
+def test_run_review_repairs_after_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    run_dir, workspace, diff_path = _prepare_review(tmp_path)
+    starts: list[dict[str, object]] = []
+    calls = 0
+
+    def start(**kwargs: object) -> str:
+        starts.append(kwargs)
+        return "container"
+
+    def execute(
+        _container: str,
+        _config: Config,
+        role_dir: Path,
+        _prompt: str,
+        _deadline: float,
+        *,
+        events_name: str,
+        **_kwargs: object,
+    ) -> SessionResult:
+        nonlocal calls
+        calls += 1
+        (role_dir / events_name).write_text(
+            '{"type":"result","result":"timed out"}\n',
+            encoding="utf-8",
+        )
+        if calls == 1:
+            return SessionResult(returncode=-1, timed_out=True)
+        return SessionResult(returncode=0)
+
+    monkeypatch.setattr(reviewer, "start_reviewer", start)
+    monkeypatch.setattr(reviewer, "run_session", execute)
+    monkeypatch.setattr(reviewer, "_final_review_text", lambda _path: '{"findings": []}')
+    monkeypatch.setattr(reviewer, "stop", lambda _name: None)
+
+    result = reviewer.run_review(
+        config,
+        _issue(),
+        pr_url="https://example.test/pull/10",
+        workspace_path=workspace,
+        diff_path=diff_path,
+        run_dir=run_dir,
+        checks_summary="pytest: success",
+        roles=("quality",),
+    )
+
+    assert result.approved
+    assert len(starts) == 2
+
+
+def test_run_review_repairs_after_watchdog_stop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = replace(
+        _config(tmp_path),
+        watchdog=WatchdogConfig(enabled=True, api_key="test"),
+    )
+    run_dir, workspace, diff_path = _prepare_review(tmp_path)
+    starts: list[dict[str, object]] = []
+    watchdogs: list[object] = []
+    calls = 0
+
+    def start(**kwargs: object) -> str:
+        starts.append(kwargs)
+        return "container"
+
+    def execute(
+        _container: str,
+        _config: Config,
+        _role_dir: Path,
+        _prompt: str,
+        _deadline: float,
+        *,
+        watchdog: object,
+        **_kwargs: object,
+    ) -> SessionResult:
+        nonlocal calls
+        calls += 1
+        watchdogs.append(watchdog)
+        if calls == 1:
+            return SessionResult(
+                returncode=-1,
+                stopped_by_watchdog=True,
+                watchdog_reason="loop detected",
+            )
+        return SessionResult(returncode=0)
+
+    monkeypatch.setattr(reviewer, "start_reviewer", start)
+    monkeypatch.setattr(reviewer, "run_session", execute)
+    monkeypatch.setattr(reviewer, "_final_review_text", lambda _path: '{"findings": []}')
+    monkeypatch.setattr(reviewer, "stop", lambda _name: None)
+
+    result = reviewer.run_review(
+        config,
+        _issue(),
+        pr_url="https://example.test/pull/10",
+        workspace_path=workspace,
+        diff_path=diff_path,
+        run_dir=run_dir,
+        checks_summary="pytest: success",
+        roles=("quality",),
+    )
+
+    assert result.approved
+    assert len(starts) == 2
+    assert watchdogs[0] is not None
 
 
 def test_run_review_rejects_nonzero_exit(

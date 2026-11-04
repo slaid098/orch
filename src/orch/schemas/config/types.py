@@ -101,7 +101,7 @@ class ReviewerConfig:
     enabled: bool = True
     image: str | None = None
     model: str | None = None
-    timeout_minutes: int = 15
+    timeout_minutes: int = 30
     max_rounds: int = 3
     autocompact: str = "200k"
     allowed_tools: str = "Read,Grep,Glob"

@@ -10,8 +10,8 @@ import pytest
 
 from orch.exceptions.worker import AgentError
 from orch.schemas.config.types import Config, LabelsConfig, RepoConfig, WatchdogConfig, WorkerConfig
+from orch.services.agent import session
 from orch.services.feedback.service import IncomingComment
-from orch.services.worker import session
 
 
 class RecordingStdin(io.StringIO):
@@ -118,6 +118,7 @@ def test_run_session_sends_prompt_and_writes_events(
         tmp_path,
         "Do the thing",
         time.monotonic() + 10,
+        command="claude",
     )
 
     assert result.returncode == 0
@@ -154,6 +155,7 @@ def test_run_session_injects_feedback_into_open_stdin(
         tmp_path,
         "Do the thing",
         time.monotonic() + 10,
+        command="claude",
         feedback=feed,  # type: ignore[arg-type]
     )
 
@@ -182,6 +184,7 @@ def test_run_session_stops_when_issue_is_cancelled(
         tmp_path,
         "Do the thing",
         time.monotonic() + 10,
+        command="claude",
         feedback=feed,  # type: ignore[arg-type]
     )
 
@@ -205,6 +208,7 @@ def test_run_session_reports_deadline(
         tmp_path,
         "Do the thing",
         time.monotonic() - 1,
+        command="claude",
     )
 
     assert result.timed_out
@@ -230,6 +234,7 @@ def test_run_session_waits_for_the_final_turn_after_handoff(
         tmp_path,
         "Do the thing",
         time.monotonic() + 10,
+        command="claude",
         completion_path=completion,
     )
 
@@ -253,6 +258,7 @@ def test_run_session_reports_popen_failure(
             tmp_path,
             "Do the thing",
             time.monotonic() + 10,
+            command="claude",
         )
 
 

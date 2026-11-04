@@ -198,6 +198,44 @@ def _review_gateway_ip() -> str:
     return ip
 
 
+def _agent_run_args(
+    *,
+    image: str,
+    name: str,
+    labels: tuple[str, ...],
+    mounts: list[str],
+    env: list[str],
+    network: str | None = None,
+    extra_hosts: tuple[str, ...] = (),
+) -> list[str]:
+    """Build the common hardened ``docker run`` arguments for an agent."""
+    args = ["docker", "run", "-d", "--name", name]
+    for label in labels:
+        args.extend(["--label", label])
+    if network is not None:
+        args.extend(["--network", network])
+    for host in extra_hosts:
+        args.extend(["--add-host", host])
+    args.extend(mounts)
+    args.extend(env)
+    args.extend(
+        [
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges",
+            "--memory",
+            "4g",
+            "--cpus",
+            "2",
+            "--pids-limit",
+            "512",
+        ]
+    )
+    args.append(image)
+    return args
+
+
 def _worker_run_args(
     *,
     image: str,
@@ -208,40 +246,24 @@ def _worker_run_args(
     model: str,
     context_tokens: int | None,
 ) -> list[str]:
-    return [
-        "docker",
-        "run",
-        "-d",
-        "--name",
-        name,
-        "--label",
-        "orch.managed=true",
-        "--label",
-        f"orch.container={name}",
-        "--add-host",
-        "host.docker.internal:host-gateway",
-        "-v",
-        f"{repo_path}:/src:ro",
-        "-v",
-        f"{workspace_path}:/work",
-        "-v",
-        f"{run_dir}:/out",
-        *_worker_env(model, context_tokens),
-        "--cap-drop",
-        "ALL",
-        "--security-opt",
-        "no-new-privileges",
-        "--memory",
-        "4g",
-        "--cpus",
-        "2",
-        "--pids-limit",
-        "512",
-        image,
-    ]
+    return _agent_run_args(
+        image=image,
+        name=name,
+        labels=("orch.managed=true", f"orch.container={name}"),
+        extra_hosts=("host.docker.internal:host-gateway",),
+        mounts=[
+            "-v",
+            f"{repo_path}:/src:ro",
+            "-v",
+            f"{workspace_path}:/work",
+            "-v",
+            f"{run_dir}:/out",
+        ],
+        env=_agent_env(model, context_tokens),
+    )
 
 
-def _worker_env(model: str, context_tokens: int | None) -> list[str]:
+def _agent_env(model: str, context_tokens: int | None) -> list[str]:
     values = {
         "ANTHROPIC_BASE_URL": "http://host.docker.internal:11434",
         "ANTHROPIC_AUTH_TOKEN": "ollama",
@@ -293,40 +315,24 @@ def start_reviewer(
         raise DockerError(f"Reviewer image {image!r} does not exist. Build it with Docker.")
 
     gateway_ip = _ensure_review_isolation(image)
-    args = [
-        "docker",
-        "run",
-        "-d",
-        "--name",
-        name,
-        "--label",
-        "orch.managed=true",
-        "--label",
-        "orch.reviewer=true",
-        "--network",
-        _REVIEW_NETWORK,
-        "--add-host",
-        f"host.docker.internal:{gateway_ip}",
-        "--add-host",
-        f"mcp.context7.com:{gateway_ip}",
-        "-v",
-        f"{repo_path}:/review:ro",
-        *_codegraph_mount(repo_path, enabled=codegraph_enabled),
-        "-v",
-        f"{run_dir}:/out",
-        *_worker_env(model, context_tokens),
-        "--cap-drop",
-        "ALL",
-        "--security-opt",
-        "no-new-privileges",
-        "--memory",
-        "4g",
-        "--cpus",
-        "2",
-        "--pids-limit",
-        "512",
-        image,
-    ]
+    args = _agent_run_args(
+        image=image,
+        name=name,
+        labels=("orch.managed=true", "orch.reviewer=true"),
+        network=_REVIEW_NETWORK,
+        extra_hosts=(
+            f"host.docker.internal:{gateway_ip}",
+            f"mcp.context7.com:{gateway_ip}",
+        ),
+        mounts=[
+            "-v",
+            f"{repo_path}:/review:ro",
+            *_codegraph_mount(repo_path, enabled=codegraph_enabled),
+            "-v",
+            f"{run_dir}:/out",
+        ],
+        env=_agent_env(model, context_tokens),
+    )
     result = _run(args, timeout=120)
     container_id = (result.stdout or "").strip()
     if not container_id:
@@ -480,13 +486,13 @@ def cleanup_managed() -> None:
 
 
 def stop(name: str) -> None:
-    """Remove a worker container, ignoring missing containers."""
+    """Remove an agent container, ignoring missing containers."""
     try:
         _run(["docker", "rm", "-f", name], timeout=60)
     except DockerError:
         log.bind(container=name).warning("Could not remove container")
     else:
-        log.info("Removed worker container {}", name)
+        log.info("Removed agent container {}", name)
 
 
 def logs(name: str, *, tail: int = 100) -> str:

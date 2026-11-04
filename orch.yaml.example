@@ -39,7 +39,7 @@ reviewer:
   enabled: true
   image: orch-agent:latest
   model: deepseek-v4.1-flash:cloud
-  timeout_minutes: 15
+  timeout_minutes: 30
   max_rounds: 3
   autocompact: 200k
   allowed_tools: "Read,Grep,Glob"
@@ -52,8 +52,11 @@ mcp:
   context7: true
   playwright: true
   antidetect: false
-  # Required when antidetect is true; must be an HTTPS endpoint.
-  # antidetect_url: https://browser-mcp.example/mcp/
+  # Required when antidetect is true. Public endpoints must use HTTPS.
+  # Plain HTTP is accepted only for local or private addresses
+  # (localhost, 127.0.0.1, ::1, host.docker.internal, RFC1918, IPv6 ULA).
+  # For local antidetect, set enabled true and use:
+  # antidetect_url: http://host.docker.internal:8765/mcp/
 
 data_dir: D:/orch/app_data
 retention_days: 7

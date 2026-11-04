@@ -7,8 +7,8 @@ import subprocess
 import time
 from pathlib import Path
 
+import orch.services.agent.session as session
 import orch.services.worker.claude as claude
-import orch.services.worker.session as session
 from orch.config.logger import get_logger
 from orch.exceptions.worker import AgentError, RunCancelled, WatchdogStop
 from orch.schemas.config.types import Config
@@ -417,16 +417,18 @@ def _run_claude_session(
     mcp_config: Path | None,
 ) -> None:
     """Run Claude Code with stream-json input and optional live injection."""
+    mcp_path = "/out/mcp.json" if mcp_config is not None else None
+    command = claude.build_stream_command(config, mcp_path)
     result = session.run_session(
         container,
         config,
         run_dir,
         prompt,
         deadline,
+        command=command,
         feedback=feedback,
         watchdog=watchdog,
         completion_path=run_dir / "handoff.json",
-        mcp_config=mcp_config,
     )
     if result.cancelled:
         raise RunCancelled(result.cancel_reason or "issue closed")
