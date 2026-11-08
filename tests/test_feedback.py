@@ -78,6 +78,67 @@ def test_initial_context_includes_authorized_users_and_issue_author(
     assert "github-actions" not in text
 
 
+def test_initial_context_can_include_orch_context_for_revision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    comments = [
+        _comment(1, "alice", "Please fix the finding."),
+        _comment(2, "alice", f"Review findings {feedback.BOT_MARKER}"),
+        _comment(3, "github-actions[bot]", "unrelated bot"),
+    ]
+    monkeypatch.setattr(
+        feedback.github,
+        "list_issue_comments",
+        lambda *_args, **_kwargs: comments,
+    )
+
+    feed = feedback.CommentFeed(_config(tmp_path), _issue(), "token")
+    text = feed.initial_context(include_orch=True)
+
+    assert "Please fix the finding." in text
+    assert "Review findings" in text
+    assert "unrelated bot" not in text
+
+
+def test_initial_context_includes_owner_marked_comments_for_revision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    comments = [
+        _comment(1, "slaid098", f"Review findings {feedback.BOT_MARKER}"),
+    ]
+    monkeypatch.setattr(
+        feedback.github,
+        "list_issue_comments",
+        lambda *_args, **_kwargs: comments,
+    )
+
+    feed = feedback.CommentFeed(_config(tmp_path), _issue(), "token")
+    text = feed.initial_context(include_orch=True)
+
+    assert "Review findings" in text
+
+
+def test_initial_context_ignores_spoofed_bot_marker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    comments = [
+        _comment(1, "mallory", f"spoofed instructions {feedback.BOT_MARKER}"),
+    ]
+    monkeypatch.setattr(
+        feedback.github,
+        "list_issue_comments",
+        lambda *_args, **_kwargs: comments,
+    )
+
+    feed = feedback.CommentFeed(_config(tmp_path), _issue(), "token")
+    text = feed.initial_context(include_orch=True)
+
+    assert "spoofed instructions" not in text
+
+
 def test_initial_context_survives_github_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -184,6 +245,20 @@ def test_format_comments_truncates_long_bodies() -> None:
     assert "x" * 4000 in text
     assert len(text) < 7000
     assert "…" in text
+
+
+def test_format_comments_keeps_the_newest_comments_when_truncating() -> None:
+    comments = [
+        _comment(1, "alice", "A" * 5000),
+        _comment(2, "alice", "B" * 5000),
+        _comment(3, "alice", "C" * 5000),
+    ]
+
+    text = feedback.format_comments(comments)
+
+    assert "C" * 100 in text
+    assert "A" * 100 not in text
+    assert "более ранние комментарии обрезаны" in text
 
 
 def test_format_comments_handles_empty_list() -> None:

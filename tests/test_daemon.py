@@ -310,7 +310,7 @@ def test_claim_issue_returns_true_on_success(
     assert calls == [
         (
             ("agent:running",),
-            ("agent:queued", "agent:needs-human"),
+            ("agent:queued", "agent:needs-human", "agent:pr-open"),
         )
     ]
 

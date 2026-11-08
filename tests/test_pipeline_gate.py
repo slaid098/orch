@@ -33,6 +33,7 @@ def _config(
     max_attempts: int = 3,
     max_rounds: int = 3,
     reviewer_enabled: bool = True,
+    auto_merge: bool = True,
 ) -> Config:
     return Config(
         repo=RepoConfig(owner="slaid098", name="orch", path=tmp_path),
@@ -52,6 +53,7 @@ def _config(
             enabled=reviewer_enabled,
             timeout_minutes=1,
             max_rounds=max_rounds,
+            auto_merge=auto_merge,
         ),
     )
 
@@ -462,6 +464,35 @@ def test_all_checks_failed_never_reaches_reviewer(
     assert _run_status(config.data_dir / "orch.db") == "needs_human"
 
 
+def test_approved_review_leaves_pr_open_for_manual_merge(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path, auto_merge=False)
+    store.init_db(config.data_dir / "orch.db")
+    events = _prepare(tmp_path, monkeypatch)
+
+    outcome = pipeline.run_issue(
+        config,
+        _issue(),
+        "token",
+        attempt_timeout_seconds=10,
+    )
+
+    assert outcome.status == "pr_open"
+    assert outcome.pr_url == "https://example.test/pull/10"
+    assert outcome.review_rounds == 1
+    assert events["workers"] == [1]
+    assert events["reviews"] == ["review"]
+    assert events["merges"] == []
+    assert events["cleaned_workspaces"] == []
+    assert any("готов к ручному merge" in str(body) for body in events["comments"])
+    assert _run_status(config.data_dir / "orch.db") == "pr_open"
+    payload = json.loads((outcome.run_dir / "result.json").read_text(encoding="utf-8"))
+    assert payload["status"] == "pr_open"
+    assert payload["review_rounds"] == 1
+
+
 def test_reviewer_disabled_opens_pr_without_merge(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -480,7 +511,7 @@ def test_reviewer_disabled_opens_pr_without_merge(
     assert outcome.status == "pr_open"
     assert events["reviews"] == []
     assert events["merges"] == []
-    assert events["cleaned_workspaces"] != []
+    assert events["cleaned_workspaces"] == []
     assert _run_status(config.data_dir / "orch.db") == "pr_open"
 
 

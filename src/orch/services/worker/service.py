@@ -34,6 +34,7 @@ def build_prompt(
     attempt: int = 1,
     previous_error: str | None = None,
     initial_context: str = "",
+    revision_pr: str | None = None,
 ) -> str:
     """Build the complete prompt sent to the worker agent."""
     role_path = Path(__file__).parent / "prompt.md"
@@ -41,6 +42,7 @@ def build_prompt(
     setup = "\n".join(f"- `{command}`" for command in config.worker.setup_commands) or "- none"
     tests = "\n".join(f"- `{command}`" for command in config.worker.test_commands)
     resume = _resume_section(attempt, previous_error)
+    revision = _revision_section(revision_pr)
 
     return (
         f"{role}\n"
@@ -52,6 +54,7 @@ def build_prompt(
         f"- `{config.repo.full_name}`\n"
         f"- Base branch: `{config.repo.base_branch}`\n"
         "- Work directory: `/work`\n\n"
+        f"{revision}"
         "## Commands\n"
         "Setup:\n"
         f"{setup}\n\n"
@@ -62,6 +65,21 @@ def build_prompt(
         "Write `/out/handoff.json` exactly as described above. Do not commit.\n"
         "The issue title is the only source for the final commit and pull-request "
         "title; do not choose or rewrite it.\n"
+    )
+
+
+def _revision_section(revision_pr: str | None) -> str:
+    if revision_pr is None:
+        return ""
+    return (
+        "## Revision\n"
+        f"This run revises the existing open pull request: {revision_pr}\n\n"
+        "The `/work` directory already contains the pull-request work. Do not "
+        "reset it, re-clone it, or discard changes. Inspect `git status`, "
+        "`git log`, and the current `/work` diff first. Read the issue comments, "
+        "then address the requested review findings or human feedback. Keep "
+        "unrelated code unchanged; the orchestrator will force-update the same "
+        "branch and pull request.\n\n"
     )
 
 
@@ -94,6 +112,7 @@ def run_worker(
     timeout_seconds: int,
     feedback: CommentFeed | None = None,
     initial_context: str = "",
+    revision_pr: str | None = None,
 ) -> WorkerResult:
     """Run one worker container and return its artifacts.
 
@@ -108,6 +127,7 @@ def run_worker(
         timeout_seconds: Hard budget for this whole attempt.
         feedback: Optional live comment feed for stream-json injection.
         initial_context: Comments fetched before the worker started.
+        revision_pr: Existing pull request to revise, if this is a revision.
 
     Returns:
         Successful worker result.
@@ -128,6 +148,7 @@ def run_worker(
         attempt=attempt,
         previous_error=previous_error,
         initial_context=initial_context,
+        revision_pr=revision_pr,
     )
     (run_dir / "prompt.md").write_text(prompt, encoding="utf-8")
     mcp_path = mcp.write_worker_config(config, run_dir / "mcp.json")
@@ -146,7 +167,14 @@ def run_worker(
     )
 
     try:
-        base_sha = _prepare_attempt(container, config, branch, deadline)
+        base_sha = _prepare_attempt(
+            container,
+            config,
+            branch,
+            deadline,
+            allow_clone=revision_pr is None,
+        )
+        head_before = _current_head(container, deadline)
         return _complete_attempt(
             container,
             config,
@@ -154,6 +182,7 @@ def run_worker(
             run_dir,
             branch,
             base_sha,
+            head_before,
             deadline,
             prompt,
             feedback=feedback,
@@ -173,9 +202,11 @@ def _prepare_attempt(
     config: Config,
     branch: str,
     deadline: float,
+    *,
+    allow_clone: bool = True,
 ) -> str:
     _write_settings(container, config, deadline)
-    base_sha = _prepare_workspace(container, branch, deadline)
+    base_sha = _prepare_workspace(container, branch, deadline, allow_clone=allow_clone)
     _run_setup(container, config, deadline)
     _prepare_codegraph(container, config, deadline)
     return base_sha
@@ -188,6 +219,7 @@ def _complete_attempt(
     run_dir: Path,
     branch: str,
     base_sha: str,
+    head_before: str,
     deadline: float,
     prompt: str,
     *,
@@ -206,7 +238,7 @@ def _complete_attempt(
         workspace_path=workspace_path,
         mcp_config=mcp_config,
     )
-    _ensure_changes(container, base_sha, deadline)
+    _ensure_changes(container, head_before, deadline)
     handoff = load_handoff(run_dir)
     _finalize_commit(container, base_sha, issue.title, run_dir, deadline)
     _write_diff(container, base_sha, run_dir, deadline)
@@ -321,15 +353,44 @@ def _container_name(run_dir: Path) -> str:
     return "".join(char if char.isalnum() or char in "-_." else "-" for char in name)[:63]
 
 
-def _prepare_workspace(container: str, branch: str, deadline: float) -> str:
+def _current_head(container: str, deadline: float) -> str:
+    result = _exec_or_raise(
+        container,
+        _GIT_ENV + "cd /work && git rev-parse HEAD",
+        timeout=_remaining(deadline, cap=60),
+        label="read workspace HEAD",
+    )
+    head = (result.stdout or "").strip().splitlines()[-1] if result.stdout else ""
+    if not head:
+        raise AgentError("Could not resolve the workspace HEAD before the agent run")
+    return head
+
+
+def _prepare_workspace(
+    container: str,
+    branch: str,
+    deadline: float,
+    *,
+    allow_clone: bool = True,
+) -> str:
+    if allow_clone:
+        workspace_setup = (
+            "if [ ! -d /work/.git ]; then "
+            "rm -rf /work || true; mkdir -p /work; git clone /src /work; "
+            "fi; "
+        )
+    else:
+        workspace_setup = (
+            "if [ ! -d /work/.git ]; then "
+            'echo "revision workspace is missing" >&2; exit 1; '
+            "fi; "
+        )
     command = (
         "set -e; "
         "export GIT_CONFIG_GLOBAL=/out/gitconfig; "
         "git config --global --add safe.directory /src/.git; "
         "git config --global --add safe.directory /work; "
-        "if [ ! -d /work/.git ]; then "
-        "rm -rf /work || true; mkdir -p /work; git clone /src /work; "
-        "fi; "
+        f"{workspace_setup}"
         "cd /work; "
         'git config user.name "orch"; '
         'git config user.email "orch@example.invalid"; '
@@ -468,7 +529,7 @@ def _run_claude(
         log.info("Claude Code finished")
 
 
-def _ensure_changes(container: str, base_sha: str, deadline: float) -> None:
+def _ensure_changes(container: str, head_before: str, deadline: float) -> None:
     status = exec_in(
         container,
         _GIT_ENV + "cd /work && git status --porcelain",
@@ -476,7 +537,7 @@ def _ensure_changes(container: str, base_sha: str, deadline: float) -> None:
     )
     commits = exec_in(
         container,
-        _GIT_ENV + f"cd /work && git rev-list --count {base_sha}..HEAD",
+        _GIT_ENV + f"cd /work && git rev-list --count {head_before}..HEAD",
         timeout=_remaining(deadline, cap=60),
     )
     if status.returncode != 0 or commits.returncode != 0:

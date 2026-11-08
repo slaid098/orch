@@ -61,6 +61,7 @@ data_dir: data
     assert config.reviewer.max_rounds == 3
     assert config.reviewer.autocompact == "200k"
     assert config.reviewer.allowed_tools == "Read,Grep,Glob"
+    assert config.reviewer.auto_merge is False
 
 
 def test_load_config_reads_pipeline_controls(tmp_path: Path) -> None:
@@ -82,6 +83,8 @@ worker:
   autocompact: 150k
   test_commands:
     - pytest
+reviewer:
+  auto_merge: true
 max_workers: 3
 retention_days: 14
 """,
@@ -94,6 +97,7 @@ retention_days: 14
     assert config.worker.timeout_minutes == 5
     assert config.worker.max_attempts == 3
     assert config.worker.autocompact == "150k"
+    assert config.reviewer.auto_merge is True
     assert config.max_workers == 3
     assert config.retention_days == 14
 

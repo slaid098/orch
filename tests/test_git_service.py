@@ -190,6 +190,29 @@ def test_push_branch_forces_updates(
     assert calls[0][-1] == "refs/heads/feature/branch:refs/heads/feature/branch"
 
 
+def test_push_branch_uses_a_lease_when_expected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    def fake_git(args: list[str], **_kwargs: object) -> None:
+        calls.append(args)
+
+    monkeypatch.setattr(git, "_run_git", fake_git)
+
+    git.push_branch(
+        tmp_path / "push.git",
+        "feature/branch",
+        "remote",
+        "token",
+        expected="abc123",
+    )
+
+    assert calls[0][3] == "--force-with-lease=refs/heads/feature/branch:abc123"
+    assert calls[0][-1] == "refs/heads/feature/branch:refs/heads/feature/branch"
+
+
 def test_branch_sha_reads_the_local_branch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

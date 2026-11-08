@@ -336,6 +336,7 @@ def _parse_reviewer(raw: dict[str, Any]) -> ReviewerConfig:
         ),
         autocompact=_parse_autocompact(reviewer_raw, "reviewer.autocompact"),
         allowed_tools=_optional_str(reviewer_raw, "allowed_tools", "Read,Grep,Glob"),
+        auto_merge=_bool(reviewer_raw.get("auto_merge", False), "reviewer.auto_merge"),
     )
 
 

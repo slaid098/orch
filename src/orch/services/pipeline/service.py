@@ -8,7 +8,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from orch.config.logger import get_logger
-from orch.exceptions.pipeline import ReviewRejected
+from orch.exceptions.github import GitHubError
+from orch.exceptions.pipeline import PublicationError, ReviewRejected
 from orch.exceptions.reviewer import ReviewerError
 from orch.exceptions.standards import StandardsError
 from orch.schemas.config.types import Config
@@ -52,6 +53,7 @@ from orch.services.pipeline.publish import (
 from orch.services.pipeline.publish import (
     _find_open_pr,
     _publish_success,
+    _revision_problem,
 )
 from orch.services.pipeline.publish import (
     _publish_branch as _publish_branch,
@@ -184,16 +186,61 @@ def _start_run(
     claim: bool,
 ) -> RunOutcome:
     repo = config.repo.full_name
-    existing_pr = _find_open_pr(repo, branch, token)
-    if existing_pr:
+    try:
+        existing_pr = _find_open_pr(repo, branch, token, strict=True)
+    except GitHubError as ex:
+        return _park_before_attempts(
+            config,
+            issue,
+            token,
+            run_dir=run_dir,
+            run_id=run_id,
+            branch=branch,
+            error=RuntimeError(f"Could not verify whether an open PR exists: {ex}"),
+        )
+    queued = config.labels.queued in issue.labels
+    if existing_pr and not queued:
         return _finish_existing_pr(config, issue, token, run_dir, run_id, branch, existing_pr)
+    pr_head: str | None = None
+    if existing_pr:
+        try:
+            pr_head = github.get_pr_status(repo, existing_pr, token).head_sha
+        except GitHubError as ex:
+            return _park_before_attempts(
+                config,
+                issue,
+                token,
+                run_dir=run_dir,
+                run_id=run_id,
+                branch=branch,
+                error=RuntimeError(f"Could not read the open PR head: {ex}"),
+                pr_url=existing_pr,
+            )
+    workspace = _workspace_path(config, issue)
+    if existing_pr or (workspace / ".git").exists():
+        problem = _workspace_problem(workspace, branch, expected_head=pr_head)
+        if problem is not None:
+            return _park_before_attempts(
+                config,
+                issue,
+                token,
+                run_dir=run_dir,
+                run_id=run_id,
+                branch=branch,
+                error=RuntimeError(problem),
+                pr_url=existing_pr,
+            )
     if claim:
         github.edit_labels(
             repo,
             issue.number,
             token,
             add=(config.labels.running,),
-            remove=(config.labels.queued, config.labels.needs_human),
+            remove=(
+                config.labels.queued,
+                config.labels.needs_human,
+                config.labels.pr_open,
+            ),
         )
     return _run_attempts(
         config,
@@ -204,7 +251,36 @@ def _start_run(
         branch=branch,
         title=title,
         timeout_seconds=timeout_seconds,
+        revision_pr=existing_pr,
+        revision_head=pr_head,
     )
+
+
+def _workspace_problem(
+    workspace: Path,
+    branch: str,
+    *,
+    expected_head: str | None,
+) -> str | None:
+    """Return why a persistent workspace cannot be safely reused, if anything."""
+    state = gitops.workspace_state(workspace)
+    if state is None:
+        return (
+            "Persistent workspace is missing or unreadable; a safe revision is "
+            "impossible"
+        )
+    actual_branch, head = state
+    if actual_branch != branch:
+        return (
+            f"Persistent workspace is on branch {actual_branch!r}, expected "
+            f"{branch!r}; refusing to reuse it"
+        )
+    if expected_head and head != expected_head:
+        return (
+            f"Persistent workspace HEAD {head[:12]} does not match the open PR "
+            f"head {expected_head[:12]}; refusing to force-push over external changes"
+        )
+    return None
 
 
 def _park_before_attempts(
@@ -216,6 +292,7 @@ def _park_before_attempts(
     run_id: str,
     branch: str,
     error: Exception,
+    pr_url: str | None = None,
 ) -> RunOutcome:
     log.bind(
         issue=issue.number,
@@ -232,12 +309,14 @@ def _park_before_attempts(
         branch,
         error,
         attempts=0,
+        pr_url=pr_url,
     )
     return RunOutcome(
         run_id=run_id,
         status=_STATUS_NEEDS_HUMAN,
         run_dir=run_dir,
         branch=branch,
+        pr_url=pr_url,
         error=str(error),
     )
 
@@ -292,7 +371,6 @@ def _finish_existing_pr(
         status=_STATUS_PR_OPEN,
         pr_url=pr_url,
     )
-    gitops.cleanup_workspace(_workspace_path(config, issue))
     return RunOutcome(
         run_id=run_id,
         status=_STATUS_PR_OPEN,
@@ -312,20 +390,26 @@ def _run_attempts(
     branch: str,
     title: str,
     timeout_seconds: int,
+    revision_pr: str | None = None,
+    revision_head: str | None = None,
 ) -> RunOutcome:
     workspace = _workspace_path(config, issue)
     source: Path | None = None
     feed: CommentFeed | None = None
     initial_context = ""
-    if config.feedback.enabled and config.feedback.live_comments:
+    needs_context = revision_pr is not None or (
+        config.feedback.enabled and config.feedback.live_comments
+    )
+    if needs_context:
         feed = CommentFeed(
             config,
             issue,
             token,
             state_path=run_dir / "feedback.json",
         )
-        initial_context = feed.initial_context()
-        feed.start()
+        initial_context = feed.initial_context(include_orch=revision_pr is not None)
+        if config.feedback.enabled and config.feedback.live_comments:
+            feed.start()
     try:
         mirror = gitops.refresh_mirror(
             config.data_dir,
@@ -352,6 +436,19 @@ def _run_attempts(
             workspace=workspace,
             feed=feed,
             initial_context=initial_context,
+            revision_pr=revision_pr,
+            revision_head=revision_head,
+        )
+    except Exception as ex:
+        return _park_before_attempts(
+            config,
+            issue,
+            token,
+            run_dir=run_dir,
+            run_id=run_id,
+            branch=branch,
+            error=ex,
+            pr_url=revision_pr,
         )
     finally:
         if feed is not None:
@@ -374,9 +471,11 @@ def _retry_until_success(
     workspace: Path,
     feed: CommentFeed | None,
     initial_context: str,
+    revision_pr: str | None = None,
+    revision_head: str | None = None,
 ) -> RunOutcome:
     last_error: Exception | None = None
-    last_pr_url: str | None = None
+    last_pr_url: str | None = revision_pr
     review_rounds = 0
     for attempt in range(1, config.worker.max_attempts + 1):
         cycle = _run_attempt_cycle(
@@ -396,12 +495,15 @@ def _retry_until_success(
             previous_error=last_error,
             review_rounds=review_rounds,
             last_pr_url=last_pr_url,
+            revision_pr=revision_pr,
+            revision_head=revision_head,
         )
         if cycle.outcome is not None:
             return cycle.outcome
         last_error = cycle.error
         review_rounds = cycle.review_rounds
         last_pr_url = cycle.pr_url or last_pr_url
+        revision_head = cycle.pr_head or revision_head
     error = last_error or RuntimeError("No attempt produced a pull request")
     return _park_after_retries(
         config,
@@ -435,7 +537,28 @@ def _run_attempt_cycle(
     previous_error: Exception | None,
     review_rounds: int,
     last_pr_url: str | None,
+    revision_pr: str | None = None,
+    revision_head: str | None = None,
 ) -> AttemptCycle:
+    if revision_pr is not None and revision_head is not None:
+        problem = _revision_problem(
+            config.repo.full_name,
+            revision_pr,
+            token,
+            revision_head,
+        )
+        if problem is not None:
+            outcome = _park_before_attempts(
+                config,
+                issue,
+                token,
+                run_dir=run_dir,
+                run_id=run_id,
+                branch=branch,
+                error=RuntimeError(problem),
+                pr_url=revision_pr,
+            )
+            return AttemptCycle(outcome, None, review_rounds, last_pr_url)
     try:
         attempt_result = _run_attempt(
             config,
@@ -452,6 +575,8 @@ def _run_attempt_cycle(
             initial_context=initial_context,
             attempt=attempt,
             previous_error=previous_error,
+            revision_pr=revision_pr,
+            revision_head=revision_head,
         )
     except Exception as ex:
         return _worker_failure_cycle(
@@ -465,6 +590,7 @@ def _run_attempt_cycle(
             attempt=attempt,
             review_rounds=review_rounds,
             last_pr_url=last_pr_url,
+            preserve_pr=revision_pr is not None,
         )
     if isinstance(attempt_result, RunOutcome):
         return AttemptCycle(attempt_result, None, review_rounds, last_pr_url)
@@ -480,6 +606,7 @@ def _run_attempt_cycle(
         review_rounds=review_rounds,
         feed=feed,
         workspace=workspace,
+        preserve_pr=revision_pr is not None,
     )
 
 
@@ -495,6 +622,7 @@ def _worker_failure_cycle(
     attempt: int,
     review_rounds: int,
     last_pr_url: str | None,
+    preserve_pr: bool = False,
 ) -> AttemptCycle:
     outcome = _retry_outcome(
         config,
@@ -505,8 +633,15 @@ def _worker_failure_cycle(
         run_dir=run_dir,
         branch=branch,
         attempt=attempt,
+        preserve_pr=preserve_pr,
     )
-    return AttemptCycle(outcome, error, review_rounds, last_pr_url)
+    return AttemptCycle(
+        outcome,
+        error,
+        review_rounds,
+        last_pr_url,
+        error.head_sha if isinstance(error, PublicationError) else None,
+    )
 
 
 def _gate_cycle(
@@ -522,6 +657,7 @@ def _gate_cycle(
     review_rounds: int,
     feed: CommentFeed | None,
     workspace: Path,
+    preserve_pr: bool = False,
 ) -> AttemptCycle:
     checks_summary, error, outcome = _checks_cycle(
         config,
@@ -533,24 +669,33 @@ def _gate_cycle(
         run_dir=run_dir,
         branch=branch,
         attempt=attempt,
+        preserve_pr=preserve_pr,
     )
     if outcome is not None or error is not None:
-        return AttemptCycle(outcome, error, review_rounds, attempt_result.pr_url)
+        return AttemptCycle(
+            outcome,
+            error,
+            review_rounds,
+            attempt_result.pr_url,
+            attempt_result.head_sha,
+        )
     if not config.reviewer.enabled:
         return AttemptCycle(
             _finish_pr_open(
                 config,
                 issue,
+                token,
                 attempt_result,
                 run_dir=run_dir,
                 run_id=run_id,
-                workspace=workspace,
                 attempt=attempt,
                 checks_summary=checks_summary,
+                review_rounds=review_rounds,
             ),
             None,
             review_rounds,
             attempt_result.pr_url,
+            attempt_result.head_sha,
         )
     return _review_cycle(
         config,
@@ -578,6 +723,7 @@ def _checks_cycle(
     run_dir: Path,
     branch: str,
     attempt: int,
+    preserve_pr: bool = False,
 ) -> tuple[str | None, Exception | None, RunOutcome | None]:
     try:
         checks = (
@@ -609,6 +755,7 @@ def _checks_cycle(
             run_dir=run_dir,
             branch=branch,
             attempt=attempt,
+            preserve_pr=preserve_pr,
         )
         return None, ex, outcome
 
@@ -709,6 +856,7 @@ def _review_failure_cycle(
         reviewer_error,
         review_round,
         attempt_result.pr_url,
+        attempt_result.head_sha,
     )
 
 
@@ -725,19 +873,46 @@ def _approved_review_cycle(
     review_round: int,
     checks_summary: str,
 ) -> AttemptCycle:
-    outcome = _merge_and_finish(
-        config,
-        issue,
-        token,
-        attempt_result,
-        run_dir=run_dir,
-        run_id=run_id,
-        workspace=workspace,
-        attempt=attempt,
-        review_rounds=review_round,
-        checks_summary=checks_summary,
+    if config.reviewer.auto_merge:
+        outcome = _merge_and_finish(
+            config,
+            issue,
+            token,
+            attempt_result,
+            run_dir=run_dir,
+            run_id=run_id,
+            workspace=workspace,
+            attempt=attempt,
+            review_rounds=review_round,
+            checks_summary=checks_summary,
+        )
+    else:
+        _best_effort_comment(
+            config.repo.full_name,
+            issue.number,
+            token,
+            f"Ревью пройдено, PR готов к ручному merge: {attempt_result.pr_url}\n\n"
+            f"Run: `{run_id}`. Раундов ревью: `{review_round}`. "
+            f"Workspace сохранён для доработки.",
+        )
+        outcome = _finish_pr_open(
+            config,
+            issue,
+            token,
+            attempt_result,
+            run_dir=run_dir,
+            run_id=run_id,
+            attempt=attempt,
+            checks_summary=checks_summary,
+            review_rounds=review_round,
+        )
+    return AttemptCycle(
+        outcome,
+        None,
+        review_round,
+        attempt_result.pr_url,
+        attempt_result.head_sha,
     )
-    return AttemptCycle(outcome, None, review_round, attempt_result.pr_url)
 
 
 def _rejected_review_cycle(
@@ -783,8 +958,15 @@ def _rejected_review_cycle(
             review_error,
             review_round,
             attempt_result.pr_url,
+            attempt_result.head_sha,
         )
-    return AttemptCycle(None, review_error, review_round, attempt_result.pr_url)
+    return AttemptCycle(
+        None,
+        review_error,
+        review_round,
+        attempt_result.pr_url,
+        attempt_result.head_sha,
+    )
 
 
 def _reviewer_error(error: Exception) -> ReviewerError:
@@ -854,6 +1036,8 @@ def _run_attempt(
     initial_context: str,
     attempt: int,
     previous_error: Exception | None,
+    revision_pr: str | None = None,
+    revision_head: str | None = None,
 ) -> AttemptSuccess | RunOutcome:
     cancelled = _attempt_cancelled(
         config,
@@ -878,6 +1062,7 @@ def _run_attempt(
         timeout_seconds=timeout_seconds,
         feedback=feed,
         initial_context=initial_context if attempt == 1 else "",
+        revision_pr=revision_pr,
     )
     cancelled = _attempt_cancelled(
         config,
@@ -899,6 +1084,8 @@ def _run_attempt(
         run_id=run_id,
         attempt=attempt,
         title=title,
+        revision_pr=revision_pr,
+        revision_head=revision_head,
     )
 
 
@@ -911,6 +1098,8 @@ def _publish_attempt(
     run_id: str,
     attempt: int,
     title: str,
+    revision_pr: str | None = None,
+    revision_head: str | None = None,
 ) -> AttemptSuccess:
     _ensure_issue_open(config, issue, token)
     pr_url, head_sha = _publish_success(
@@ -921,6 +1110,8 @@ def _publish_attempt(
         run_id=run_id,
         attempt=attempt,
         title=title,
+        revision_pr=revision_pr,
+        revision_head=revision_head,
     )
     return AttemptSuccess(worker=worker, pr_url=pr_url, head_sha=head_sha)
 
@@ -960,6 +1151,7 @@ def _run_worker_attempt(
     timeout_seconds: int,
     feedback: CommentFeed | None,
     initial_context: str,
+    revision_pr: str | None = None,
 ) -> WorkerResult:
     attempt_started = time.monotonic()
     log.info(
@@ -974,6 +1166,8 @@ def _run_worker_attempt(
         extra["feedback"] = feedback
     if initial_context:
         extra["initial_context"] = initial_context
+    if revision_pr:
+        extra["revision_pr"] = revision_pr
     worker = run_worker(
         config,
         issue,

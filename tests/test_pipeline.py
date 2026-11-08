@@ -286,7 +286,7 @@ def test_exhausted_attempts_mark_needs_human(
     assert outcome.status == "needs_human"
     assert labels[0] == (
         ("agent:running",),
-        ("agent:queued", "agent:needs-human"),
+        ("agent:queued", "agent:needs-human", "agent:pr-open"),
     )
     assert labels[-1] == (
         ("agent:needs-human",),

@@ -115,6 +115,8 @@ def test_run_worker_success(
         assert timeout > 0
         if "printf" in command:
             return _proc("base123\n")
+        if "git rev-parse HEAD" in command:
+            return _proc("head123\n")
         if "git status --porcelain" in command:
             return _proc(" M file.py\n")
         if "git rev-list" in command:
@@ -186,6 +188,8 @@ def test_run_worker_rejects_no_changes_and_stops_container(
         del timeout, stdout_path, stderr_path
         if "printf" in command:
             return _proc("base123\n")
+        if "git rev-parse HEAD" in command:
+            return _proc("head123\n")
         return _proc("")
 
     monkeypatch.setattr(worker, "exec_in", fake_exec)
@@ -227,6 +231,8 @@ def test_run_worker_reports_failed_tests(
         del timeout, stdout_path, stderr_path
         if "printf" in command:
             return _proc("base123\n")
+        if "git rev-parse HEAD" in command:
+            return _proc("head123\n")
         if "git status --porcelain" in command:
             return _proc(" M file.py\n")
         if "git rev-list" in command:
@@ -285,6 +291,36 @@ def test_prepare_workspace_reclones_corrupted_workspace(
 
     assert "rm -rf /work || true" in commands[0]
     assert "git clone /src /work" in commands[0]
+
+
+def test_prepare_workspace_refuses_to_rebuild_a_revision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[str] = []
+
+    def fake_exec(
+        _name: str,
+        command: str,
+        *,
+        timeout: int,
+        stdout_path: Path | None = None,
+        stderr_path: Path | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        del timeout, stdout_path, stderr_path
+        commands.append(command)
+        return _proc("base123\n")
+
+    monkeypatch.setattr(worker, "exec_in", fake_exec)
+
+    worker._prepare_workspace(
+        "container",
+        "branch",
+        time.monotonic() + 30,
+        allow_clone=False,
+    )
+
+    assert "revision workspace is missing" in commands[0]
+    assert "git clone /src /work" not in commands[0]
 
 
 def test_run_setup_skips_empty_commands(
@@ -519,6 +555,8 @@ def _stream_exec(run_dir: Path):
         del timeout
         if "printf" in command:
             return _proc("base123\n")
+        if "git rev-parse HEAD" in command:
+            return _proc("head123\n")
         if "git status --porcelain" in command:
             return _proc(" M file.py\n")
         if "git rev-list" in command:

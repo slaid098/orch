@@ -4,10 +4,11 @@ Minimal GitHub issue to pull request orchestrator for containerized coding agent
 
 `orch` watches GitHub issues labelled `agent:queued`, runs a worker container
 with Claude Code, validates a deterministic commit, runs the repository tests,
-pushes the branch, and opens a pull request. It then waits for GitHub checks,
-runs two separate read-only reviewer containers (quality and security), and
-squash-merges the pull request into `main` only when every check is green and
-both reviewers return no findings.
+pushes the branch, and opens a pull request. It then waits for GitHub checks and
+runs two separate read-only reviewer containers (quality and security). By
+default an approved pull request stays open for a human to merge. Opt-in
+`reviewer.auto_merge: true` squash-merges it into `main` only when every check is
+green and both reviewers return no findings.
 
 ## What it does
 
@@ -27,14 +28,16 @@ GitHub issue with agent:queued
   -> quality and security reviewers run in parallel in isolated containers
   -> both must return an empty findings array; any finding blocks
   -> any finding consumes one shared worker attempt and goes back to the worker
-  -> two empty findings arrays trigger a squash merge into main
+  -> approved PR stays open for manual merge by default
+  -> reviewer.auto_merge: true squash-merges it into main after green checks
   -> three total worker attempts or three review rounds exhaust to needs-human
 ```
 
 The worker has no GitHub token. It cannot push or create pull requests. Both
 reviewers have no GitHub token and only read-only repository tools plus local
 CodeGraph and Context7. Reviewers never receive Playwright or antidetect-browser
-access. Only the orchestrator process writes, comments, and merges.
+access. Only the orchestrator process writes and comments; it merges only when
+`reviewer.auto_merge` is explicitly enabled.
 
 ## Live feedback and cancellation
 
@@ -50,11 +53,11 @@ persisted in `<run-dir>/feedback.json`.
 Closing the issue is the cancellation signal. The comment poller notices it,
 stops the worker container, and abandons the attempt without retrying and
 without opening a pull request. The persistent workspace remains under
-`app_data/workspaces/<owner>__<repo>/issue-N` and is removed by retention after
+`app_data/workspaces/<owner>__<repo>/issue-N`; it is not pruned by
 `retention_days`. Reopening the issue and adding `agent:queued` again resumes
 from the same workspace.
 
-## Reviewer and auto-merge
+## Reviewer and merge policy
 
 After the worker opens or updates a pull request, orch force-updates the same
 deterministic branch and polls the checks for the newly pushed commit until they
@@ -95,15 +98,24 @@ technical reviewer failure (invalid JSON after one repair launch, timeout, or
 container failure) does not consume a worker attempt: the issue is parked
 immediately in `agent:needs-human`.
 
-A successful review is followed by a squash merge into `main` only. The
-repository base branch must be `main`; orch refuses to auto-merge into any other
-branch. A merge failure is also parked for a human. The persistent workspace is
-kept until a merge succeeds, a human is needed, or the review gate is disabled.
+By default `reviewer.auto_merge` is `false`. A successful review posts a comment,
+labels the issue `agent:pr-open`, and leaves the pull request open for a human to
+merge. The persistent workspace is kept so the PR can be revised.
 
-If a run starts and finds an already-open PR for the same deterministic branch,
-it leaves that PR for a human (`agent:pr-open`) instead of starting another
-worker. This avoids guessing at a workspace or diff that may have been cleaned
-up after the previous run; orch never auto-merges such a PR.
+To revise an open pull request, add `agent:queued` to the issue and describe the
+requested change in a comment. Orch claims the issue again and reuses the saved
+workspace only when its branch and HEAD still match the open pull request. It
+then force-updates the same branch with a lease and reruns checks and review. If
+the workspace is missing, unreadable, on another branch, or its HEAD no longer
+matches the PR, orch parks the issue in `agent:needs-human` instead of rebuilding
+it from the base branch. If the PR was closed or its head moved during the run,
+orch refuses to push and does not open a replacement PR.
+
+With `reviewer.auto_merge: true`, a successful review is followed by a squash
+merge into `main` only. The repository base branch must be `main`; orch refuses
+to auto-merge into any other branch. A merge failure is also parked for a human.
+The workspace is removed only after a successful merge; it is kept for manual
+review, revision, and `agent:needs-human`.
 
 ## Telegram status
 
@@ -147,10 +159,9 @@ orch writes `checkpoint.patch`, `checkpoint.status`, and
 `checkpoint-untracked.tar.gz` into the attempt directory, so tracked and
 untracked work can be recovered even if the workspace is damaged. The next
 attempt continues in the same directory with a fresh context and a short
-handoff. The workspace is deleted after a successful merge, or when the reviewer
-is disabled and the PR is left for manual review. When orch parks an issue in
-`agent:needs-human`, the workspace is kept so a human can inspect the failed
-checkout; it can be removed manually after the issue is resolved.
+handoff. The workspace is deleted after a successful auto-merge. It is kept for
+manual review, revision, and `agent:needs-human` so a human can inspect or
+continue the checkout; it can be removed manually after the issue is resolved.
 
 ## Requirements
 
@@ -216,12 +227,13 @@ uv run python main.py --issue N --once
 directly (the `agent:queued` label is not required), claims it
 (`agent:running`), runs the worker, validates and squashes the commit, runs
 `worker.test_commands`, pushes the branch, opens the pull request, waits for
-GitHub checks, runs the reviewer, and merges when approved. It processes
-exactly one issue and never polls.
+GitHub checks, and runs the reviewer. An approved pull request stays open for
+manual merge by default, or is merged when `reviewer.auto_merge: true`. It
+processes exactly one issue and never polls.
 
 - Exit code `0`: the pull request was merged, or it is open for manual review
-  because `reviewer.enabled` is false. The log prints its URL and the run
-  directory; the issue is commented.
+  because `reviewer.auto_merge` is false or `reviewer.enabled` is false. The log
+  prints its URL and the run directory; the issue is commented.
 - Exit code `1`: the issue is labelled `agent:needs-human`. Inspect the error,
   `result.json`, and the worker and reviewer logs in the printed run directory
   under `app_data/runs/<owner>__<repo>/issue-N/<run-id>/`.
@@ -230,8 +242,8 @@ A live run needs Docker, an authenticated `gh`, and the worker image built in
 [Setup](#setup). It makes up to `worker.max_attempts` attempts and
 `reviewer.max_rounds` review rounds, each worker attempt bounded by
 `worker.timeout_minutes`, so it can take a long time and consumes model quota.
-If the smoke test is merged, the issue is closed automatically; otherwise close
-the pull request, branch, and issue when done.
+If the smoke test is auto-merged, the issue is closed automatically; otherwise
+review and merge the pull request yourself, or close it and the issue when done.
 
 ## First production run
 
@@ -291,25 +303,27 @@ Use this checklist for the first controlled run against a real issue. Complete
    - `Reviewer role quality: approved` and `Reviewer role security: approved` —
      both reviewers returned empty `findings` arrays. Each raw result is under
      `review-<R>/<role>/`.
-   - `Reviewer decision: approved` — merged findings are empty and the PR may
-     merge.
-   - `Squash-merged pull request #M` and `Issue #N merged: <url>` — the PR was
-     squash-merged into `main`, and `Closes #N` in its body closes the issue.
+   - `Reviewer decision: approved` — merged findings are empty.
+   - `Issue #N is waiting for manual review and merge: <url>` — the default
+     manual-merge path kept the PR open and the workspace saved.
+   - `Squash-merged pull request #M` and `Issue #N merged: <url>` — only with
+     `reviewer.auto_merge: true`; `Closes #N` closes the issue.
 
    The command then exits with code `0` and prints `Run directory: ...`.
 
 6. **Tell success from `agent:needs-human`.**
 
-   - Success: exit code `0`, the status line `merged: <url>`, the issue is
-     closed, and `result.json` has `"status": "merged"` plus `merge_commit`
-     when GitHub reported it.
+   - Success: exit code `0`. With auto-merge, the status line is
+     `merged: <url>`, the issue is closed, and `result.json` has
+     `"status": "merged"` plus `merge_commit` when GitHub reported it. Without
+     auto-merge, the status is `pr_open` and the PR waits for a human.
    - Parked: exit code `1`, the status line `Needs human: ...`, the issue
      carries `agent:needs-human` and a comment with the error and run ID, and
      `result.json` has `"status": "needs_human"`. The issue stays open; inspect
      the artifacts and re-queue it only after fixing the cause.
-   - Exit code `0` alone does not prove a merge: with `reviewer.enabled: false`
-     orch stops after green checks, exits `0`, and leaves `result.json` with
-     status `pr_open` for a human to merge.
+   - Exit code `0` alone does not prove a merge: the default manual-merge path
+     and `reviewer.enabled: false` both leave `result.json` with status
+     `pr_open` for a human to merge.
 
 7. **Find the artifacts.** The printed run directory is
    `app_data/runs/<owner>__<repo>/issue-N/<run-id>/`. It contains:
@@ -368,8 +382,10 @@ Feature flags:
   one-shot worker.
 - `watchdog.enabled` — Clef-based hang and loop classification; requires an
   Ollama Cloud key.
-- `reviewer.enabled` — run both read-only reviewers and auto-merge approved
-  PRs. Disable it to stop after green checks and leave the PR for a human.
+- `reviewer.enabled` — run both read-only reviewers. Disable it to stop after
+  green checks and leave the PR for a human.
+- `reviewer.auto_merge` — opt-in squash merge after green checks and an
+  approved review. Default `false` leaves the PR open for manual merge.
 - `checks.*` — GitHub check polling timeout, interval, and the grace period for
   checks to appear after a PR is opened.
 - `mcp.*` — enable or disable CodeGraph, Context7, Playwright, and
@@ -388,9 +404,11 @@ inherits it. `reviewer.autocompact` applies the same setting to reviewer
 containers; both roles use `200k` so the shared model and image behave
 consistently. `auto` leaves the window to Claude Code.
 
-`retention_days` (default 7) removes old run directories and rotated logs, so
-local artifacts never grow without bound. Rotation happens at daemon startup
-and after every finished issue; old files are deleted, not archived.
+`retention_days` (default 7) removes old run directories and rotated logs.
+Rotation happens at daemon startup and after every finished issue; old files are
+deleted, not archived. Persistent issue workspaces are intentionally kept for
+manual review and revision; remove them manually after their PRs and issues are
+closed.
 
 ## Security model
 
@@ -399,8 +417,9 @@ and after every finished issue; old files are deleted, not archived.
 - `/work` is the persistent workspace, not readable by the orchestrator token.
 - The worker has no GitHub token and cannot push.
 - Only the issue author and explicitly allowed users can inject comments; bot
-  comments and orch's own comments are filtered out. Comment text is still
-  treated as untrusted task context.
+  comments are filtered out, and orch's own marked comments enter revision
+  context only when their author is allowed. Comment text is still treated as
+  untrusted task context.
 - The Telegram token stays in the orchestrator and is never mounted into the
   worker.
 - The worker writes a git bundle and handoff to `/out`.
@@ -412,8 +431,8 @@ and after every finished issue; old files are deleted, not archived.
 - Reviewer JSON is schema-validated and fail-closed; invalid output never
   approves or merges. A repair launch is allowed once per review role per
   round. Both roles must independently return empty `findings`.
-- Only the orchestrator merges, and only into `main` after green checks and an
-  empty reviewer findings array.
+- Only the orchestrator can merge, and only when `reviewer.auto_merge: true` is
+  set: into `main`, after green checks and an empty reviewer findings array.
 - Logs stay in the local `app_data` directory and are pruned after
   `retention_days`.
 

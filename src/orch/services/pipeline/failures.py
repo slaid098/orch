@@ -55,6 +55,7 @@ def _handle_attempt_failure(
     attempt: int,
     branch: str,
     error: Exception,
+    preserve_pr: bool = False,
 ) -> None:
     log.bind(
         issue=issue.number,
@@ -73,6 +74,11 @@ def _handle_attempt_failure(
         error=error,
         run_id=run_id,
     )
+    if preserve_pr:
+        log.bind(branch=branch).info(
+            "Keeping the pull-request branch because this run revises an open PR"
+        )
+        return
     _delete_stale_branch(config, branch, token)
 
 
@@ -86,6 +92,7 @@ def _retry_outcome(
     run_dir: Path,
     branch: str,
     attempt: int,
+    preserve_pr: bool = False,
 ) -> RunOutcome | None:
     if isinstance(error, RunCancelled):
         return _cancel_run(
@@ -116,5 +123,6 @@ def _retry_outcome(
         attempt=attempt,
         branch=branch,
         error=error,
+        preserve_pr=preserve_pr,
     )
     return None

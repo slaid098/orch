@@ -96,7 +96,7 @@ class ChecksConfig:
 
 @dataclass(frozen=True)
 class ReviewerConfig:
-    """Read-only reviewer container settings."""
+    """Read-only reviewer container and merge policy settings."""
 
     enabled: bool = True
     image: str | None = None
@@ -105,6 +105,7 @@ class ReviewerConfig:
     max_rounds: int = 3
     autocompact: str = "200k"
     allowed_tools: str = "Read,Grep,Glob"
+    auto_merge: bool = False
 
 
 @dataclass(frozen=True)
