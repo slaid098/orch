@@ -34,6 +34,7 @@ def build_prompt(
     attempt: int = 1,
     previous_error: str | None = None,
     initial_context: str = "",
+    revision_pr: str | None = None,
 ) -> str:
     """Build the complete prompt sent to the worker agent."""
     role_path = Path(__file__).parent / "prompt.md"
@@ -41,6 +42,7 @@ def build_prompt(
     setup = "\n".join(f"- `{command}`" for command in config.worker.setup_commands) or "- none"
     tests = "\n".join(f"- `{command}`" for command in config.worker.test_commands)
     resume = _resume_section(attempt, previous_error)
+    revision = _revision_section(revision_pr)
 
     return (
         f"{role}\n"
@@ -52,6 +54,7 @@ def build_prompt(
         f"- `{config.repo.full_name}`\n"
         f"- Base branch: `{config.repo.base_branch}`\n"
         "- Work directory: `/work`\n\n"
+        f"{revision}"
         "## Commands\n"
         "Setup:\n"
         f"{setup}\n\n"
@@ -62,6 +65,21 @@ def build_prompt(
         "Write `/out/handoff.json` exactly as described above. Do not commit.\n"
         "The issue title is the only source for the final commit and pull-request "
         "title; do not choose or rewrite it.\n"
+    )
+
+
+def _revision_section(revision_pr: str | None) -> str:
+    if revision_pr is None:
+        return ""
+    return (
+        "## Revision\n"
+        f"This run revises the existing open pull request: {revision_pr}\n\n"
+        "The `/work` directory already contains the pull-request work. Do not "
+        "reset it, re-clone it, or discard changes. Inspect `git status`, "
+        "`git log`, and the current `/work` diff first. Read the issue comments, "
+        "then address the requested review findings or human feedback. Keep "
+        "unrelated code unchanged; the orchestrator will force-update the same "
+        "branch and pull request.\n\n"
     )
 
 
@@ -94,6 +112,7 @@ def run_worker(
     timeout_seconds: int,
     feedback: CommentFeed | None = None,
     initial_context: str = "",
+    revision_pr: str | None = None,
 ) -> WorkerResult:
     """Run one worker container and return its artifacts.
 
@@ -108,6 +127,7 @@ def run_worker(
         timeout_seconds: Hard budget for this whole attempt.
         feedback: Optional live comment feed for stream-json injection.
         initial_context: Comments fetched before the worker started.
+        revision_pr: Existing pull request to revise, if this is a revision.
 
     Returns:
         Successful worker result.
@@ -128,6 +148,7 @@ def run_worker(
         attempt=attempt,
         previous_error=previous_error,
         initial_context=initial_context,
+        revision_pr=revision_pr,
     )
     (run_dir / "prompt.md").write_text(prompt, encoding="utf-8")
     mcp_path = mcp.write_worker_config(config, run_dir / "mcp.json")

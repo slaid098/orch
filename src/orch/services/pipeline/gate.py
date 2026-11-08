@@ -120,9 +120,9 @@ def _finish_pr_open(
     *,
     run_dir: Path,
     run_id: str,
-    workspace: Path,
     attempt: int,
     checks_summary: str,
+    review_rounds: int = 0,
 ) -> RunOutcome:
     _write_result(
         run_dir,
@@ -135,7 +135,7 @@ def _finish_pr_open(
             "checks_passed": True,
             "checks": checks_summary,
             "attempts": attempt,
-            "review_rounds": 0,
+            "review_rounds": review_rounds,
         },
     )
     store.finish_run(
@@ -144,13 +144,18 @@ def _finish_pr_open(
         status=_STATUS_PR_OPEN,
         pr_url=attempt_result.pr_url,
     )
-    gitops.cleanup_workspace(workspace)
+    log.info(
+        "Issue #{} is waiting for manual review and merge: {}",
+        issue.number,
+        attempt_result.pr_url,
+    )
     return RunOutcome(
         run_id=run_id,
         status=_STATUS_PR_OPEN,
         run_dir=run_dir,
         branch=attempt_result.worker.branch,
         pr_url=attempt_result.pr_url,
+        review_rounds=review_rounds,
     )
 
 

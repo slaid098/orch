@@ -16,6 +16,7 @@ from orch.schemas.github.types import Issue
 from orch.schemas.standards.types import Handoff
 from orch.schemas.worker.types import WorkerResult
 from orch.services import store
+from orch.services.pipeline import publish
 from orch.services.pipeline import service as pipeline
 
 
@@ -33,14 +34,14 @@ def _config(tmp_path: Path, *, max_attempts: int = 2) -> Config:
     )
 
 
-def _issue() -> Issue:
+def _issue(labels: tuple[str, ...] = ("agent:queued",)) -> Issue:
     return Issue(
         number=9,
         title="fix(pipeline): add reliable retry path",
         body="Do it.",
         url="https://example.test/issues/9",
         author="slaid098",
-        labels=("agent:queued",),
+        labels=labels,
     )
 
 
@@ -99,7 +100,7 @@ def test_existing_pr_is_reused(
         lambda *_args, **_kwargs: pytest.fail("worker must not start"),
     )
 
-    outcome = pipeline.run_issue(config, _issue(), "token")
+    outcome = pipeline.run_issue(config, _issue(labels=()), "token")
 
     assert outcome.status == "pr_open"
     assert outcome.pr_url == "https://example.test/pr/9"
@@ -110,7 +111,117 @@ def test_existing_pr_is_reused(
             ("agent:queued", "agent:running", "agent:needs-human"),
         )
     ]
-    assert cleaned == [config.data_dir / "workspaces" / "slaid098__orch" / "issue-9"]
+    assert cleaned == []
+
+
+def test_queued_existing_pr_revises_the_saved_workspace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    store.init_db(config.data_dir / "orch.db")
+    pr_url = "https://example.test/pr/9"
+    workspace = config.data_dir / "workspaces" / "slaid098__orch" / "issue-9"
+    (workspace / ".git").mkdir(parents=True)
+    revisions: list[str | None] = []
+    comments: list[str] = []
+    labels: list[tuple[tuple[str, ...], tuple[str, ...]]] = []
+    cleaned: list[Path] = []
+
+    monkeypatch.setattr(pipeline.github, "find_open_pr", lambda *_args: pr_url)
+    monkeypatch.setattr(pipeline.github, "issue_is_open", lambda *_args: True)
+    monkeypatch.setattr(
+        pipeline.gitops,
+        "refresh_mirror",
+        lambda *_args: tmp_path / "mirror.git",
+    )
+
+    def clone_source(_mirror: Path, _base: str, destination: Path) -> Path:
+        destination.mkdir(parents=True)
+        return destination
+
+    monkeypatch.setattr(pipeline.gitops, "clone_source", clone_source)
+    monkeypatch.setattr(pipeline.gitops, "cleanup_source", lambda _source: None)
+    monkeypatch.setattr(pipeline.gitops, "cleanup_workspace", lambda path: cleaned.append(path))
+    monkeypatch.setattr(pipeline, "_wait_for_checks", lambda *_args: "CI: success")
+    monkeypatch.setattr(publish, "_publish_branch", lambda *_args: None)
+    monkeypatch.setattr(
+        pipeline.github,
+        "comment_issue",
+        lambda _repo, _number, _token, body: comments.append(body),
+    )
+    monkeypatch.setattr(
+        pipeline.github,
+        "edit_labels",
+        lambda _repo, _number, _token, *, add, remove: labels.append((add, remove)),
+    )
+
+    def run_worker(
+        _config: Config,
+        _issue: Issue,
+        run_dir: Path,
+        **kwargs: object,
+    ) -> WorkerResult:
+        revision = kwargs.get("revision_pr")
+        revisions.append(revision if isinstance(revision, str) else None)
+        return _worker(run_dir, "fix/pipeline/issue-9-add-reliable-retry-path")
+
+    monkeypatch.setattr(pipeline, "run_worker", run_worker)
+
+    outcome = pipeline.run_issue(config, _issue(), "token", attempt_timeout_seconds=10)
+
+    assert outcome.status == "pr_open"
+    assert outcome.pr_url == pr_url
+    assert revisions == [pr_url]
+    assert labels[0] == (
+        ("agent:running",),
+        ("agent:queued", "agent:needs-human", "agent:pr-open"),
+    )
+    assert cleaned == []
+    assert any("orch открыл PR" in body for body in comments)
+
+
+def test_queued_existing_pr_without_workspace_is_parked(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    store.init_db(config.data_dir / "orch.db")
+    comments: list[str] = []
+    labels: list[tuple[tuple[str, ...], tuple[str, ...]]] = []
+
+    monkeypatch.setattr(
+        pipeline.github,
+        "find_open_pr",
+        lambda *_args: "https://example.test/pr/9",
+    )
+    monkeypatch.setattr(
+        pipeline.github,
+        "comment_issue",
+        lambda _repo, _number, _token, body: comments.append(body),
+    )
+    monkeypatch.setattr(
+        pipeline.github,
+        "edit_labels",
+        lambda _repo, _number, _token, *, add, remove: labels.append((add, remove)),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "run_worker",
+        lambda *_args, **_kwargs: pytest.fail("worker must not start"),
+    )
+
+    outcome = pipeline.run_issue(config, _issue(), "token")
+
+    assert outcome.status == "needs_human"
+    assert outcome.pr_url == "https://example.test/pr/9"
+    assert "workspace is missing" in (outcome.error or "")
+    assert any("workspace is missing" in body for body in comments)
+    assert any("https://example.test/pr/9" in body for body in comments)
+    assert labels[-1] == (
+        ("agent:needs-human",),
+        ("agent:running", "agent:queued"),
+    )
 
 
 def test_source_preparation_failure_is_parked(

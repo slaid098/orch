@@ -43,6 +43,9 @@ reviewer:
   max_rounds: 3
   autocompact: 200k
   allowed_tools: "Read,Grep,Glob"
+  # Approved PRs stay open for manual merge by default. Set true to squash-merge
+  # into main after green checks and an empty findings array from both reviewers.
+  auto_merge: false
 
 # MCP servers baked into the worker image. Reviewer containers only receive
 # codegraph and context7; playwright and antidetect stay worker-only.

@@ -67,3 +67,25 @@ def test_build_prompt_resumes_existing_workspace(tmp_path: Path) -> None:
     assert "committed in `HEAD`" in prompt
     assert "GH_TOKEN" not in prompt
     assert "tests failed" in prompt
+
+
+def test_build_prompt_explains_existing_pull_request_revision(tmp_path: Path) -> None:
+    issue = Issue(
+        number=11,
+        title="fix(worker): address review findings",
+        body="Fix it.",
+        url="https://example.test/issues/11",
+        author="slaid098",
+        labels=("agent:queued", "agent:pr-open"),
+    )
+
+    prompt = build_prompt(
+        _config(tmp_path),
+        issue,
+        revision_pr="https://example.test/pull/12",
+    )
+
+    assert "## Revision" in prompt
+    assert "https://example.test/pull/12" in prompt
+    assert "Do not reset it" in prompt
+    assert "force-update the same branch" in prompt

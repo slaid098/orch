@@ -348,7 +348,11 @@ def _claim_issue(config: Config, issue: github.Issue, token: str) -> bool:
             issue.number,
             token,
             add=(config.labels.running,),
-            remove=(config.labels.queued, config.labels.needs_human),
+            remove=(
+                config.labels.queued,
+                config.labels.needs_human,
+                config.labels.pr_open,
+            ),
         )
     except GitHubError as ex:
         log.bind(
