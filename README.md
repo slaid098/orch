@@ -103,10 +103,13 @@ labels the issue `agent:pr-open`, and leaves the pull request open for a human t
 merge. The persistent workspace is kept so the PR can be revised.
 
 To revise an open pull request, add `agent:queued` to the issue and describe the
-requested change in a comment. Orch claims the issue again, reuses the saved
-workspace, force-updates the same branch, and reruns checks and review. If the
-workspace is missing, orch cannot safely revise the PR and parks the issue in
-`agent:needs-human` instead of rebuilding it from the base branch.
+requested change in a comment. Orch claims the issue again and reuses the saved
+workspace only when its branch and HEAD still match the open pull request. It
+then force-updates the same branch with a lease and reruns checks and review. If
+the workspace is missing, unreadable, on another branch, or its HEAD no longer
+matches the PR, orch parks the issue in `agent:needs-human` instead of rebuilding
+it from the base branch. If the PR was closed or its head moved during the run,
+orch refuses to push and does not open a replacement PR.
 
 With `reviewer.auto_merge: true`, a successful review is followed by a squash
 merge into `main` only. The repository base branch must be `main`; orch refuses
@@ -414,8 +417,9 @@ closed.
 - `/work` is the persistent workspace, not readable by the orchestrator token.
 - The worker has no GitHub token and cannot push.
 - Only the issue author and explicitly allowed users can inject comments; bot
-  comments and orch's own comments are filtered out. Comment text is still
-  treated as untrusted task context.
+  comments are filtered out, and orch's own marked comments enter revision
+  context only when their author is allowed. Comment text is still treated as
+  untrusted task context.
 - The Telegram token stays in the orchestrator and is never mounted into the
   worker.
 - The worker writes a git bundle and handoff to `/out`.

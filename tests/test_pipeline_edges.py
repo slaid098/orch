@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from orch.exceptions.github import GitHubError
+from orch.exceptions.pipeline import PublicationError
 from orch.schemas.config.types import (
     Config,
     LabelsConfig,
@@ -161,7 +162,7 @@ def test_queued_existing_pr_revises_the_saved_workspace(
     monkeypatch.setattr(pipeline.gitops, "cleanup_source", lambda _source: None)
     monkeypatch.setattr(pipeline.gitops, "cleanup_workspace", lambda path: cleaned.append(path))
     monkeypatch.setattr(pipeline, "_wait_for_checks", lambda *_args: "CI: success")
-    monkeypatch.setattr(publish, "_publish_branch", lambda *_args: None)
+    monkeypatch.setattr(publish, "_publish_branch", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
         pipeline.github,
         "comment_issue",
@@ -546,3 +547,283 @@ def test_publish_branch_imports_and_pushes(
             "remote",
         )
     ]
+
+
+def test_publish_branch_forwards_the_revision_lease(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker = _worker(tmp_path, "fix/pipeline/issue-9-add-reliable-retry-path")
+    leases: list[str | None] = []
+
+    monkeypatch.setattr(
+        pipeline.gitops,
+        "import_bundle",
+        lambda bundle, branch, run_dir: tmp_path / "bare.git",
+    )
+    monkeypatch.setattr(
+        pipeline.gitops,
+        "authenticated_remote",
+        lambda owner, name, token: "remote",
+    )
+    monkeypatch.setattr(
+        pipeline.gitops,
+        "push_branch",
+        lambda bare, branch, remote, token, *, expected=None: leases.append(expected),
+    )
+    monkeypatch.setattr(
+        pipeline.gitops,
+        "branch_sha",
+        lambda _bare, _branch: "newsha",
+    )
+
+    assert (
+        publish._publish_branch(
+            _config(tmp_path),
+            worker,
+            "token",
+            expected="oldsha",
+        )
+        == "newsha"
+    )
+    assert leases == ["oldsha"]
+
+
+def test_publish_success_refuses_a_closed_revision_pr(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker = _worker(tmp_path, "fix/pipeline/issue-9-add-reliable-retry-path")
+
+    monkeypatch.setattr(
+        publish.github,
+        "get_pr_status",
+        lambda *_args: PullRequestStatus(
+            number=9,
+            url="https://example.test/pr/9",
+            state="CLOSED",
+            mergeable="UNKNOWN",
+            head_sha="abc123",
+            checks=(),
+        ),
+    )
+    monkeypatch.setattr(
+        publish,
+        "_publish_branch",
+        lambda *_args, **_kwargs: pytest.fail("must not push"),
+    )
+
+    with pytest.raises(GitHubError, match="no longer open"):
+        publish._publish_success(
+            _config(tmp_path),
+            _issue(),
+            "token",
+            worker,
+            run_id="run",
+            attempt=1,
+            title="title",
+            revision_pr="https://example.test/pr/9",
+            revision_head="abc123",
+        )
+
+
+def test_publish_success_refuses_a_moved_revision_head(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker = _worker(tmp_path, "fix/pipeline/issue-9-add-reliable-retry-path")
+
+    monkeypatch.setattr(
+        publish.github,
+        "get_pr_status",
+        lambda *_args: PullRequestStatus(
+            number=9,
+            url="https://example.test/pr/9",
+            state="OPEN",
+            mergeable="MERGEABLE",
+            head_sha="newsha",
+            checks=(),
+        ),
+    )
+    monkeypatch.setattr(
+        publish,
+        "_publish_branch",
+        lambda *_args, **_kwargs: pytest.fail("must not push"),
+    )
+
+    with pytest.raises(GitHubError, match="head moved"):
+        publish._publish_success(
+            _config(tmp_path),
+            _issue(),
+            "token",
+            worker,
+            run_id="run",
+            attempt=1,
+            title="title",
+            revision_pr="https://example.test/pr/9",
+            revision_head="abc123",
+        )
+
+
+def test_publish_success_attaches_the_pushed_head_to_lookup_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker = _worker(tmp_path, "fix/pipeline/issue-9-add-reliable-retry-path")
+
+    monkeypatch.setattr(
+        publish.github,
+        "get_pr_status",
+        lambda *_args: PullRequestStatus(
+            number=9,
+            url="https://example.test/pr/9",
+            state="OPEN",
+            mergeable="MERGEABLE",
+            head_sha="abc123",
+            checks=(),
+        ),
+    )
+    monkeypatch.setattr(
+        publish,
+        "_publish_branch",
+        lambda *_args, **_kwargs: "pushed1",
+    )
+
+    def fail(*_args: object) -> str | None:
+        raise GitHubError("offline")
+
+    monkeypatch.setattr(publish.github, "find_open_pr", fail)
+
+    with pytest.raises(PublicationError) as info:
+        publish._publish_success(
+            _config(tmp_path),
+            _issue(),
+            "token",
+            worker,
+            run_id="run",
+            attempt=1,
+            title="title",
+            revision_pr="https://example.test/pr/9",
+            revision_head="abc123",
+        )
+
+    assert info.value.head_sha == "pushed1"
+
+
+def test_worker_failure_cycle_keeps_the_pushed_head(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        pipeline,
+        "_retry_outcome",
+        lambda *_args, **_kwargs: None,
+    )
+
+    cycle = pipeline._worker_failure_cycle(
+        _config(tmp_path),
+        _issue(),
+        "token",
+        PublicationError("lookup failed", "pushed1"),
+        run_id="run",
+        run_dir=tmp_path,
+        branch="fix/pipeline/issue-9-add-reliable-retry-path",
+        attempt=1,
+        review_rounds=0,
+        last_pr_url="https://example.test/pr/9",
+    )
+
+    assert cycle.pr_head == "pushed1"
+
+
+def test_revision_retry_tracks_the_head_pushed_by_the_previous_attempt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    store.init_db(config.data_dir / "orch.db")
+    pr_url = "https://example.test/pr/9"
+    branch = "fix/pipeline/issue-9-add-reliable-retry-path"
+    workspace = config.data_dir / "workspaces" / "slaid098__orch" / "issue-9"
+    (workspace / ".git").mkdir(parents=True)
+    remote_head = "abc123"
+    workers: list[str | None] = []
+    checks = iter([GitHubError("checks failed"), "CI: success"])
+
+    monkeypatch.setattr(pipeline.github, "find_open_pr", lambda *_args: pr_url)
+    monkeypatch.setattr(pipeline.github, "issue_is_open", lambda *_args: True)
+    monkeypatch.setattr(
+        pipeline.github,
+        "get_pr_status",
+        lambda *_args: PullRequestStatus(
+            number=9,
+            url=pr_url,
+            state="OPEN",
+            mergeable="MERGEABLE",
+            head_sha=remote_head,
+            checks=(),
+        ),
+    )
+    monkeypatch.setattr(
+        pipeline.gitops,
+        "workspace_state",
+        lambda _path: (branch, "abc123"),
+    )
+    monkeypatch.setattr(
+        pipeline.gitops,
+        "refresh_mirror",
+        lambda *_args: tmp_path / "mirror.git",
+    )
+
+    def clone_source(_mirror: Path, _base: str, destination: Path) -> Path:
+        destination.mkdir(parents=True)
+        return destination
+
+    monkeypatch.setattr(pipeline.gitops, "clone_source", clone_source)
+    monkeypatch.setattr(pipeline.gitops, "cleanup_source", lambda _source: None)
+
+    def wait_for_checks(*_args: object, **_kwargs: object) -> str:
+        result = next(checks)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    monkeypatch.setattr(pipeline, "_wait_for_checks", wait_for_checks)
+
+    def publish_branch(
+        _config: Config,
+        _worker: WorkerResult,
+        _token: str,
+        *,
+        expected: str | None = None,
+    ) -> str:
+        nonlocal remote_head
+        assert expected == remote_head
+        remote_head = f"pushed{len(workers)}"
+        return remote_head
+
+    monkeypatch.setattr(publish, "_publish_branch", publish_branch)
+    monkeypatch.setattr(pipeline.github, "comment_issue", lambda *_args: None)
+    monkeypatch.setattr(
+        pipeline.github,
+        "edit_labels",
+        lambda *_args, **_kwargs: None,
+    )
+
+    def run_worker(
+        _config: Config,
+        _issue: Issue,
+        run_dir: Path,
+        **kwargs: object,
+    ) -> WorkerResult:
+        revision = kwargs.get("revision_pr")
+        workers.append(revision if isinstance(revision, str) else None)
+        return _worker(run_dir, branch)
+
+    monkeypatch.setattr(pipeline, "run_worker", run_worker)
+
+    outcome = pipeline.run_issue(config, _issue(), "token", attempt_timeout_seconds=10)
+
+    assert outcome.status == "pr_open"
+    assert workers == [pr_url, pr_url]
+    assert remote_head == "pushed2"

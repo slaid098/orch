@@ -167,7 +167,13 @@ def run_worker(
     )
 
     try:
-        base_sha = _prepare_attempt(container, config, branch, deadline)
+        base_sha = _prepare_attempt(
+            container,
+            config,
+            branch,
+            deadline,
+            allow_clone=revision_pr is None,
+        )
         head_before = _current_head(container, deadline)
         return _complete_attempt(
             container,
@@ -196,9 +202,11 @@ def _prepare_attempt(
     config: Config,
     branch: str,
     deadline: float,
+    *,
+    allow_clone: bool = True,
 ) -> str:
     _write_settings(container, config, deadline)
-    base_sha = _prepare_workspace(container, branch, deadline)
+    base_sha = _prepare_workspace(container, branch, deadline, allow_clone=allow_clone)
     _run_setup(container, config, deadline)
     _prepare_codegraph(container, config, deadline)
     return base_sha
@@ -358,15 +366,31 @@ def _current_head(container: str, deadline: float) -> str:
     return head
 
 
-def _prepare_workspace(container: str, branch: str, deadline: float) -> str:
+def _prepare_workspace(
+    container: str,
+    branch: str,
+    deadline: float,
+    *,
+    allow_clone: bool = True,
+) -> str:
+    if allow_clone:
+        workspace_setup = (
+            "if [ ! -d /work/.git ]; then "
+            "rm -rf /work || true; mkdir -p /work; git clone /src /work; "
+            "fi; "
+        )
+    else:
+        workspace_setup = (
+            "if [ ! -d /work/.git ]; then "
+            'echo "revision workspace is missing" >&2; exit 1; '
+            "fi; "
+        )
     command = (
         "set -e; "
         "export GIT_CONFIG_GLOBAL=/out/gitconfig; "
         "git config --global --add safe.directory /src/.git; "
         "git config --global --add safe.directory /work; "
-        "if [ ! -d /work/.git ]; then "
-        "rm -rf /work || true; mkdir -p /work; git clone /src /work; "
-        "fi; "
+        f"{workspace_setup}"
         "cd /work; "
         'git config user.name "orch"; '
         'git config user.email "orch@example.invalid"; '

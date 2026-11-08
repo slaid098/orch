@@ -182,7 +182,14 @@ def import_bundle(bundle: Path, branch: str, run_dir: Path) -> Path:
     return bare
 
 
-def push_branch(bare: Path, branch: str, remote_url: str, token: str) -> None:
+def push_branch(
+    bare: Path,
+    branch: str,
+    remote_url: str,
+    token: str,
+    *,
+    expected: str | None = None,
+) -> None:
     """Push a branch from a bare repository to GitHub.
 
     Args:
@@ -190,10 +197,13 @@ def push_branch(bare: Path, branch: str, remote_url: str, token: str) -> None:
         branch: Branch name to push.
         remote_url: Authenticated or unauthenticated GitHub remote URL.
         token: GitHub token used for redaction in error messages.
+        expected: When set, require the remote branch to still point at this
+            commit via ``--force-with-lease`` before replacing it.
     """
     env = os.environ.copy()
     env["GIT_TERMINAL_PROMPT"] = "0"
     env["GH_PROMPT_DISABLED"] = "1"
+    lease = f"--force-with-lease=refs/heads/{branch}:{expected}" if expected else "--force"
 
     try:
         _run_git(
@@ -201,7 +211,7 @@ def push_branch(bare: Path, branch: str, remote_url: str, token: str) -> None:
                 "--git-dir",
                 str(bare),
                 "push",
-                "--force",
+                lease,
                 remote_url,
                 f"refs/heads/{branch}:refs/heads/{branch}",
             ],

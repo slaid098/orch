@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from orch.config.logger import get_logger
 from orch.exceptions.github import GitHubError
+from orch.exceptions.pipeline import PublicationError
 from orch.schemas.config.types import Config
 from orch.schemas.github.types import Issue
 from orch.schemas.worker.types import WorkerResult
@@ -49,10 +50,40 @@ def _delete_stale_branch(config: Config, branch: str, token: str) -> None:
     github.delete_branch(config.repo.full_name, branch, token)
 
 
-def _publish_branch(config: Config, worker: WorkerResult, token: str) -> str:
+def _revision_problem(
+    repo: str,
+    pr_url: str,
+    token: str,
+    expected_head: str,
+) -> str | None:
+    """Return why a revision PR cannot be safely updated, if anything."""
+    try:
+        status = github.get_pr_status(repo, pr_url, token)
+    except GitHubError as ex:
+        return f"Could not verify pull request {pr_url}: {ex}"
+    if status.state != "OPEN":
+        return f"Pull request {pr_url} is no longer open; refusing to publish"
+    if status.head_sha != expected_head:
+        return (
+            f"Pull request {pr_url} head moved from {expected_head[:12]} to "
+            f"{status.head_sha[:12]}; refusing to force-push"
+        )
+    return None
+
+
+def _publish_branch(
+    config: Config,
+    worker: WorkerResult,
+    token: str,
+    *,
+    expected: str | None = None,
+) -> str:
     bare = gitops.import_bundle(worker.bundle_path, worker.branch, worker.run_dir)
     remote = gitops.authenticated_remote(config.repo.owner, config.repo.name, token)
-    gitops.push_branch(bare, worker.branch, remote, token)
+    if expected is None:
+        gitops.push_branch(bare, worker.branch, remote, token)
+    else:
+        gitops.push_branch(bare, worker.branch, remote, token, expected=expected)
     return gitops.branch_sha(bare, worker.branch)
 
 
@@ -82,10 +113,41 @@ def _publish_success(
     run_id: str,
     attempt: int,
     title: str,
+    revision_pr: str | None = None,
+    revision_head: str | None = None,
 ) -> tuple[str, str]:
     repo = config.repo.full_name
-    head_sha = _publish_branch(config, worker, token) or ""
-    pr_url = _find_open_pr(repo, worker.branch, token, strict=True)
+    if revision_pr is not None:
+        problem = _revision_problem(
+            repo,
+            revision_pr,
+            token,
+            revision_head or "",
+        )
+        if problem is not None:
+            raise GitHubError(problem)
+    if revision_head is None:
+        head_sha = _publish_branch(config, worker, token) or ""
+    else:
+        head_sha = _publish_branch(config, worker, token, expected=revision_head) or ""
+    try:
+        pr_url = _find_open_pr(repo, worker.branch, token, strict=True)
+    except GitHubError as ex:
+        if revision_pr is None:
+            raise
+        raise PublicationError(str(ex), head_sha) from ex
+    if revision_pr is not None:
+        if pr_url is None:
+            raise PublicationError(
+                f"Revision pull request {revision_pr} is no longer open; "
+                "refusing to create a replacement",
+                head_sha,
+            )
+        if pr_url != revision_pr:
+            raise PublicationError(
+                f"Branch {worker.branch} belongs to {pr_url}, expected {revision_pr}",
+                head_sha,
+            )
     updated = pr_url is not None
     if pr_url is None:
         pr_url = github.create_pr(

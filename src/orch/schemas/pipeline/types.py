@@ -25,6 +25,7 @@ class AttemptCycle:
     error: Exception | None
     review_rounds: int
     pr_url: str | None
+    pr_head: str | None = None
 
 
 @dataclass(frozen=True)

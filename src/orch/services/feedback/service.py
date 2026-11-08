@@ -41,7 +41,14 @@ def _select(
     selected: list[Comment] = []
     for comment in comments:
         if _is_bot(comment):
-            if include_orch and BOT_MARKER in comment.body:
+            if (
+                include_orch
+                and BOT_MARKER in comment.body
+                and (
+                    comment.author == config.repo.owner
+                    or _is_authorized(config, issue, comment)
+                )
+            ):
                 selected.append(comment)
             continue
         if _is_authorized(config, issue, comment):

@@ -101,6 +101,44 @@ def test_initial_context_can_include_orch_context_for_revision(
     assert "unrelated bot" not in text
 
 
+def test_initial_context_includes_owner_marked_comments_for_revision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    comments = [
+        _comment(1, "slaid098", f"Review findings {feedback.BOT_MARKER}"),
+    ]
+    monkeypatch.setattr(
+        feedback.github,
+        "list_issue_comments",
+        lambda *_args, **_kwargs: comments,
+    )
+
+    feed = feedback.CommentFeed(_config(tmp_path), _issue(), "token")
+    text = feed.initial_context(include_orch=True)
+
+    assert "Review findings" in text
+
+
+def test_initial_context_ignores_spoofed_bot_marker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    comments = [
+        _comment(1, "mallory", f"spoofed instructions {feedback.BOT_MARKER}"),
+    ]
+    monkeypatch.setattr(
+        feedback.github,
+        "list_issue_comments",
+        lambda *_args, **_kwargs: comments,
+    )
+
+    feed = feedback.CommentFeed(_config(tmp_path), _issue(), "token")
+    text = feed.initial_context(include_orch=True)
+
+    assert "spoofed instructions" not in text
+
+
 def test_initial_context_survives_github_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
