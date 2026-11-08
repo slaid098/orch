@@ -210,20 +210,25 @@ def list_issue_comments(
     *,
     since: str | None = None,
 ) -> list[Comment]:
-    """Return issue comments, optionally updated after an ISO timestamp."""
-    path = f"repos/{repo}/issues/{number}/comments?per_page=100"
-    if since:
-        path += f"&since={quote(since, safe='')}"
-    output = _run_gh(["api", path], token)
-    try:
-        data = json.loads(output or "[]")
-    except json.JSONDecodeError as ex:
-        log.bind(error=ex, error_type=type(ex).__name__).error(
-            "Could not parse gh api issue comments output"
-        )
-        raise GitHubError("Could not parse issue comments") from ex
-    else:
-        return [Comment.from_json(item) for item in data]
+    """Return all issue comments, optionally updated after an ISO timestamp."""
+    comments: list[Comment] = []
+    page = 1
+    while True:
+        path = f"repos/{repo}/issues/{number}/comments?per_page=100&page={page}"
+        if since:
+            path += f"&since={quote(since, safe='')}"
+        output = _run_gh(["api", path], token)
+        try:
+            data = json.loads(output or "[]")
+        except json.JSONDecodeError as ex:
+            log.bind(error=ex, error_type=type(ex).__name__).error(
+                "Could not parse gh api issue comments output"
+            )
+            raise GitHubError("Could not parse issue comments") from ex
+        comments.extend(Comment.from_json(item) for item in data)
+        if len(data) < 100:
+            return comments
+        page += 1
 
 
 def issue_is_open(repo: str, number: int, token: str) -> bool:

@@ -429,6 +429,42 @@ def test_list_issue_comments_parses_and_encodes_since(
     assert "since=2026-11-02T09%3A00%3A00Z" in calls[0][1]
 
 
+def test_list_issue_comments_paginates(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[list[str]] = []
+    first_page = [
+        {
+            "id": index,
+            "user": {"login": "slaid098"},
+            "body": "Hello",
+            "created_at": "2026-11-02T10:00:00Z",
+            "html_url": f"https://example.test/comment/{index}",
+        }
+        for index in range(100)
+    ]
+    second_page = [
+        {
+            "id": 100,
+            "user": {"login": "slaid098"},
+            "body": "Newest",
+            "created_at": "2026-11-02T11:00:00Z",
+            "html_url": "https://example.test/comment/100",
+        }
+    ]
+
+    def fake_run(args: list[str], _token: str) -> str:
+        calls.append(args)
+        return json.dumps(first_page if len(calls) == 1 else second_page)
+
+    monkeypatch.setattr(github, "_run_gh", fake_run)
+
+    comments = github.list_issue_comments("slaid098/orch", 7, "token")
+
+    assert len(comments) == 101
+    assert comments[-1].body == "Newest"
+    assert "page=1" in calls[0][1]
+    assert "page=2" in calls[1][1]
+
+
 def test_list_issue_comments_rejects_invalid_json(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

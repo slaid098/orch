@@ -115,6 +115,8 @@ def test_run_worker_success(
         assert timeout > 0
         if "printf" in command:
             return _proc("base123\n")
+        if "git rev-parse HEAD" in command:
+            return _proc("head123\n")
         if "git status --porcelain" in command:
             return _proc(" M file.py\n")
         if "git rev-list" in command:
@@ -186,6 +188,8 @@ def test_run_worker_rejects_no_changes_and_stops_container(
         del timeout, stdout_path, stderr_path
         if "printf" in command:
             return _proc("base123\n")
+        if "git rev-parse HEAD" in command:
+            return _proc("head123\n")
         return _proc("")
 
     monkeypatch.setattr(worker, "exec_in", fake_exec)
@@ -227,6 +231,8 @@ def test_run_worker_reports_failed_tests(
         del timeout, stdout_path, stderr_path
         if "printf" in command:
             return _proc("base123\n")
+        if "git rev-parse HEAD" in command:
+            return _proc("head123\n")
         if "git status --porcelain" in command:
             return _proc(" M file.py\n")
         if "git rev-list" in command:
@@ -519,6 +525,8 @@ def _stream_exec(run_dir: Path):
         del timeout
         if "printf" in command:
             return _proc("base123\n")
+        if "git rev-parse HEAD" in command:
+            return _proc("head123\n")
         if "git status --porcelain" in command:
             return _proc(" M file.py\n")
         if "git rev-list" in command:

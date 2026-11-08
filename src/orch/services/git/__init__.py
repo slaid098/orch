@@ -9,6 +9,7 @@ from orch.services.git.service import (
     import_bundle,
     push_branch,
     refresh_mirror,
+    workspace_state,
 )
 
 __all__ = [
@@ -20,4 +21,5 @@ __all__ = [
     "import_bundle",
     "push_branch",
     "refresh_mirror",
+    "workspace_state",
 ]

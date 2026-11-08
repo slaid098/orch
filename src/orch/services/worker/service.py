@@ -168,6 +168,7 @@ def run_worker(
 
     try:
         base_sha = _prepare_attempt(container, config, branch, deadline)
+        head_before = _current_head(container, deadline)
         return _complete_attempt(
             container,
             config,
@@ -175,6 +176,7 @@ def run_worker(
             run_dir,
             branch,
             base_sha,
+            head_before,
             deadline,
             prompt,
             feedback=feedback,
@@ -209,6 +211,7 @@ def _complete_attempt(
     run_dir: Path,
     branch: str,
     base_sha: str,
+    head_before: str,
     deadline: float,
     prompt: str,
     *,
@@ -227,7 +230,7 @@ def _complete_attempt(
         workspace_path=workspace_path,
         mcp_config=mcp_config,
     )
-    _ensure_changes(container, base_sha, deadline)
+    _ensure_changes(container, head_before, deadline)
     handoff = load_handoff(run_dir)
     _finalize_commit(container, base_sha, issue.title, run_dir, deadline)
     _write_diff(container, base_sha, run_dir, deadline)
@@ -340,6 +343,19 @@ def _checkpoint(
 def _container_name(run_dir: Path) -> str:
     name = f"orch-{run_dir.parent.name}-{run_dir.name}".lower()
     return "".join(char if char.isalnum() or char in "-_." else "-" for char in name)[:63]
+
+
+def _current_head(container: str, deadline: float) -> str:
+    result = _exec_or_raise(
+        container,
+        _GIT_ENV + "cd /work && git rev-parse HEAD",
+        timeout=_remaining(deadline, cap=60),
+        label="read workspace HEAD",
+    )
+    head = (result.stdout or "").strip().splitlines()[-1] if result.stdout else ""
+    if not head:
+        raise AgentError("Could not resolve the workspace HEAD before the agent run")
+    return head
 
 
 def _prepare_workspace(container: str, branch: str, deadline: float) -> str:
@@ -489,7 +505,7 @@ def _run_claude(
         log.info("Claude Code finished")
 
 
-def _ensure_changes(container: str, base_sha: str, deadline: float) -> None:
+def _ensure_changes(container: str, head_before: str, deadline: float) -> None:
     status = exec_in(
         container,
         _GIT_ENV + "cd /work && git status --porcelain",
@@ -497,7 +513,7 @@ def _ensure_changes(container: str, base_sha: str, deadline: float) -> None:
     )
     commits = exec_in(
         container,
-        _GIT_ENV + f"cd /work && git rev-list --count {base_sha}..HEAD",
+        _GIT_ENV + f"cd /work && git rev-list --count {head_before}..HEAD",
         timeout=_remaining(deadline, cap=60),
     )
     if status.returncode != 0 or commits.returncode != 0:

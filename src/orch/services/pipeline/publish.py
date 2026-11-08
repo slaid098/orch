@@ -18,18 +18,32 @@ from orch.services.standards import format_pr_body
 log = get_logger(component="pipeline")
 
 
-def _find_open_pr(repo: str, branch: str, token: str) -> str | None:
+def _find_open_pr(
+    repo: str,
+    branch: str,
+    token: str,
+    *,
+    strict: bool = False,
+) -> str | None:
     try:
         return github.find_open_pr(repo, branch, token)
     except GitHubError as ex:
         log.bind(branch=branch, error=str(ex)).warning(
             "Could not check for an existing pull request"
         )
+        if strict:
+            raise
         return None
 
 
 def _delete_stale_branch(config: Config, branch: str, token: str) -> None:
-    existing = _find_open_pr(config.repo.full_name, branch, token)
+    try:
+        existing = _find_open_pr(config.repo.full_name, branch, token, strict=True)
+    except GitHubError:
+        log.bind(branch=branch).warning(
+            "Skipping stale branch deletion because the open-PR check failed"
+        )
+        return
     if existing:
         return
     github.delete_branch(config.repo.full_name, branch, token)
@@ -47,9 +61,12 @@ def _success_comment(
     pr_url: str,
     run_id: str,
     attempt: int,
+    *,
+    updated: bool = False,
 ) -> str:
+    action = "обновил" if updated else "открыл"
     return (
-        f"orch открыл PR: {pr_url}\n\n"
+        f"orch {action} PR: {pr_url}\n\n"
         f"Попытка: `{attempt}`. Локальные тесты прошли. "
         f"Проверяю GitHub checks и ревьюера. Run: `{run_id}`\n\n"
         f"{worker.handoff.what[:3000]}\n"
@@ -68,7 +85,8 @@ def _publish_success(
 ) -> tuple[str, str]:
     repo = config.repo.full_name
     head_sha = _publish_branch(config, worker, token) or ""
-    pr_url = _find_open_pr(repo, worker.branch, token)
+    pr_url = _find_open_pr(repo, worker.branch, token, strict=True)
+    updated = pr_url is not None
     if pr_url is None:
         pr_url = github.create_pr(
             repo,
@@ -82,7 +100,7 @@ def _publish_success(
         repo,
         issue.number,
         token,
-        _success_comment(worker, pr_url, run_id, attempt),
+        _success_comment(worker, pr_url, run_id, attempt, updated=updated),
     )
     _best_effort_labels(
         repo,

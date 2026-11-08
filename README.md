@@ -401,9 +401,11 @@ inherits it. `reviewer.autocompact` applies the same setting to reviewer
 containers; both roles use `200k` so the shared model and image behave
 consistently. `auto` leaves the window to Claude Code.
 
-`retention_days` (default 7) removes old run directories and rotated logs, so
-local artifacts never grow without bound. Rotation happens at daemon startup
-and after every finished issue; old files are deleted, not archived.
+`retention_days` (default 7) removes old run directories and rotated logs.
+Rotation happens at daemon startup and after every finished issue; old files are
+deleted, not archived. Persistent issue workspaces are intentionally kept for
+manual review and revision; remove them manually after their PRs and issues are
+closed.
 
 ## Security model
 

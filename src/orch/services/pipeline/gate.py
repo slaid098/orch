@@ -20,6 +20,7 @@ from orch.services.pipeline.lifecycle import (
     _STATUS_MERGED,
     _STATUS_PR_OPEN,
     _best_effort_comment,
+    _best_effort_labels,
     _cancel_run,
     _park_after_retries,
     _write_result,
@@ -116,6 +117,7 @@ def _format_check_failure(status: PullRequestStatus) -> str:
 def _finish_pr_open(
     config: Config,
     issue: Issue,
+    token: str,
     attempt_result: AttemptSuccess,
     *,
     run_dir: Path,
@@ -124,6 +126,13 @@ def _finish_pr_open(
     checks_summary: str,
     review_rounds: int = 0,
 ) -> RunOutcome:
+    _best_effort_labels(
+        config.repo.full_name,
+        issue.number,
+        token,
+        add=(config.labels.pr_open,),
+        remove=(config.labels.running, config.labels.needs_human),
+    )
     _write_result(
         run_dir,
         {

@@ -86,8 +86,34 @@ def cleanup_source(destination: Path) -> None:
     _remove_if_present(destination, label="worker source")
 
 
+def workspace_state(destination: Path) -> tuple[str, str] | None:
+    """Return the current branch and HEAD of a persistent workspace.
+
+    Args:
+        destination: Host workspace mounted at ``/work``.
+
+    Returns:
+        ``(branch, head_sha)``, or ``None`` when the workspace is missing or
+        cannot be inspected as a git checkout.
+    """
+    if not (destination / ".git").exists():
+        return None
+    try:
+        branch = _run_git(
+            ["-C", str(destination), "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=destination,
+        ).strip()
+        head = _run_git(
+            ["-C", str(destination), "rev-parse", "HEAD"],
+            cwd=destination,
+        ).strip()
+    except GitError:
+        return None
+    return branch, head
+
+
 def cleanup_workspace(destination: Path) -> None:
-    """Remove a persisted issue workspace after a pull request is created."""
+    """Remove a persisted issue workspace after a successful auto-merge."""
     _remove_if_present(destination, label="issue workspace")
 
 

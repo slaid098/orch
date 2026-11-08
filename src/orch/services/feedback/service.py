@@ -31,12 +31,22 @@ def _is_bot(comment: Comment) -> bool:
     return BOT_MARKER in comment.body or comment.author.endswith("[bot]")
 
 
-def _select(comments: list[Comment], config: Config, issue: Issue) -> list[Comment]:
-    return [
-        comment
-        for comment in comments
-        if _is_authorized(config, issue, comment) and not _is_bot(comment)
-    ]
+def _select(
+    comments: list[Comment],
+    config: Config,
+    issue: Issue,
+    *,
+    include_orch: bool = False,
+) -> list[Comment]:
+    selected: list[Comment] = []
+    for comment in comments:
+        if _is_bot(comment):
+            if include_orch and BOT_MARKER in comment.body:
+                selected.append(comment)
+            continue
+        if _is_authorized(config, issue, comment):
+            selected.append(comment)
+    return selected
 
 
 def format_comments(comments: list[Comment]) -> str:
@@ -44,17 +54,19 @@ def format_comments(comments: list[Comment]) -> str:
     if not comments:
         return ""
     lines = ["## Комментарии к issue до старта", ""]
+    blocks: list[str] = []
     total = 0
-    for comment in comments[-20:]:
+    for comment in reversed(comments[-20:]):
         body = comment.body.strip()
         if len(body) > _MAX_COMMENT_CHARS:
             body = body[:_MAX_COMMENT_CHARS] + "\n…"
         block = f"- @{comment.author} ({comment.created_at}):\n{body}\n"
         if total + len(block) > _MAX_INITIAL_CHARS:
-            lines.append("- … остальные комментарии обрезаны")
+            lines.append("- … более ранние комментарии обрезаны")
             break
-        lines.append(block)
+        blocks.append(block)
         total += len(block)
+    lines.extend(reversed(blocks))
     return "\n".join(lines).strip() + "\n\n"
 
 
@@ -101,8 +113,13 @@ class CommentFeed:
         """Return the highest comment id observed so far."""
         return self._last_id
 
-    def initial_context(self) -> str:
-        """Fetch comments made before the worker starts and format them."""
+    def initial_context(self, *, include_orch: bool = False) -> str:
+        """Fetch comments made before the worker starts and format them.
+
+        Args:
+            include_orch: Include orch's own marked comments, which carry review
+                findings and terminal failure context for a revision.
+        """
         try:
             comments = github.list_issue_comments(
                 self._config.repo.full_name,
@@ -118,7 +135,14 @@ class CommentFeed:
             return ""
         else:
             self._remember(comments)
-            return format_comments(_select(comments, self._config, self._issue))
+            return format_comments(
+                _select(
+                    comments,
+                    self._config,
+                    self._issue,
+                    include_orch=include_orch,
+                )
+            )
 
     def start(self) -> None:
         """Start polling in a daemon thread."""

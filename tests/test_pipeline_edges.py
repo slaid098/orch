@@ -12,7 +12,7 @@ from orch.schemas.config.types import (
     ReviewerConfig,
     WorkerConfig,
 )
-from orch.schemas.github.types import Issue
+from orch.schemas.github.types import Issue, PullRequestStatus
 from orch.schemas.standards.types import Handoff
 from orch.schemas.worker.types import WorkerResult
 from orch.services import store
@@ -131,6 +131,23 @@ def test_queued_existing_pr_revises_the_saved_workspace(
     monkeypatch.setattr(pipeline.github, "find_open_pr", lambda *_args: pr_url)
     monkeypatch.setattr(pipeline.github, "issue_is_open", lambda *_args: True)
     monkeypatch.setattr(
+        pipeline.github,
+        "get_pr_status",
+        lambda *_args: PullRequestStatus(
+            number=9,
+            url=pr_url,
+            state="OPEN",
+            mergeable="MERGEABLE",
+            head_sha="abc123",
+            checks=(),
+        ),
+    )
+    monkeypatch.setattr(
+        pipeline.gitops,
+        "workspace_state",
+        lambda _path: ("fix/pipeline/issue-9-add-reliable-retry-path", "abc123"),
+    )
+    monkeypatch.setattr(
         pipeline.gitops,
         "refresh_mirror",
         lambda *_args: tmp_path / "mirror.git",
@@ -178,7 +195,7 @@ def test_queued_existing_pr_revises_the_saved_workspace(
         ("agent:queued", "agent:needs-human", "agent:pr-open"),
     )
     assert cleaned == []
-    assert any("orch открыл PR" in body for body in comments)
+    assert any("orch обновил PR" in body for body in comments)
 
 
 def test_queued_existing_pr_without_workspace_is_parked(
@@ -194,6 +211,18 @@ def test_queued_existing_pr_without_workspace_is_parked(
         pipeline.github,
         "find_open_pr",
         lambda *_args: "https://example.test/pr/9",
+    )
+    monkeypatch.setattr(
+        pipeline.github,
+        "get_pr_status",
+        lambda *_args: PullRequestStatus(
+            number=9,
+            url="https://example.test/pr/9",
+            state="OPEN",
+            mergeable="MERGEABLE",
+            head_sha="abc123",
+            checks=(),
+        ),
     )
     monkeypatch.setattr(
         pipeline.github,
@@ -222,6 +251,82 @@ def test_queued_existing_pr_without_workspace_is_parked(
         ("agent:needs-human",),
         ("agent:running", "agent:queued"),
     )
+
+
+def test_existing_pr_lookup_failure_parks_instead_of_starting_fresh(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    store.init_db(config.data_dir / "orch.db")
+    comments: list[str] = []
+
+    def fail(*_args: object) -> str | None:
+        raise GitHubError("offline")
+
+    monkeypatch.setattr(pipeline.github, "find_open_pr", fail)
+    monkeypatch.setattr(
+        pipeline.github,
+        "comment_issue",
+        lambda _repo, _number, _token, body: comments.append(body),
+    )
+    monkeypatch.setattr(pipeline.github, "edit_labels", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        pipeline,
+        "run_worker",
+        lambda *_args, **_kwargs: pytest.fail("worker must not start"),
+    )
+
+    outcome = pipeline.run_issue(config, _issue(), "token")
+
+    assert outcome.status == "needs_human"
+    assert "Could not verify whether an open PR exists" in (outcome.error or "")
+    assert any("offline" in body for body in comments)
+
+
+def test_revision_refuses_a_workspace_behind_the_pr_head(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    store.init_db(config.data_dir / "orch.db")
+    workspace = config.data_dir / "workspaces" / "slaid098__orch" / "issue-9"
+    (workspace / ".git").mkdir(parents=True)
+
+    monkeypatch.setattr(
+        pipeline.github,
+        "find_open_pr",
+        lambda *_args: "https://example.test/pr/9",
+    )
+    monkeypatch.setattr(
+        pipeline.github,
+        "get_pr_status",
+        lambda *_args: PullRequestStatus(
+            number=9,
+            url="https://example.test/pr/9",
+            state="OPEN",
+            mergeable="MERGEABLE",
+            head_sha="newsha",
+            checks=(),
+        ),
+    )
+    monkeypatch.setattr(
+        pipeline.gitops,
+        "workspace_state",
+        lambda _path: ("fix/pipeline/issue-9-add-reliable-retry-path", "oldsha"),
+    )
+    monkeypatch.setattr(pipeline.github, "comment_issue", lambda *_args: None)
+    monkeypatch.setattr(pipeline.github, "edit_labels", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        pipeline,
+        "run_worker",
+        lambda *_args, **_kwargs: pytest.fail("worker must not start"),
+    )
+
+    outcome = pipeline.run_issue(config, _issue(), "token")
+
+    assert outcome.status == "needs_human"
+    assert "does not match the open PR head" in (outcome.error or "")
 
 
 def test_source_preparation_failure_is_parked(
@@ -261,6 +366,8 @@ def test_find_open_pr_failure_is_ignored(
     monkeypatch.setattr(pipeline.github, "find_open_pr", fail)
 
     assert pipeline._find_open_pr("slaid098/orch", "branch", "token") is None
+    with pytest.raises(GitHubError, match="offline"):
+        pipeline._find_open_pr("slaid098/orch", "branch", "token", strict=True)
 
 
 def test_worker_branch_must_match_the_issue_title(
