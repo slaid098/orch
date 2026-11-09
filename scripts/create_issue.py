@@ -32,7 +32,7 @@ def main(argv: list[str] | None = None) -> int:
         url = _create_issue(args, title)
     except StandardsError as ex:
         logger.bind(error=ex, error_type=type(ex).__name__).error(
-            "Issue input does not satisfy the workflow policy"
+            "Issue input does not satisfy the workflow policy: {}", ex
         )
         return 2
     except (OSError, RuntimeError) as ex:

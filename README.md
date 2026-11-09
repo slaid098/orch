@@ -366,6 +366,21 @@ identity depends only on the issue number:
 - Pull-request body uses four Russian sections, ends with `Closes #N`, and
   carries a hidden `<!-- orch:issue=N -->` marker for stable lookup.
 
+Issue bodies use a fixed eight-section contract. Every section must be present,
+in order, and non-empty; extra level-two headings are rejected. This gives an
+agent with no prior context enough information to implement the task without
+guessing:
+
+- `## Контекст` — current behavior, affected files, and why the task exists.
+- `## Задача` — the exact change and the observable result.
+- `## Контракты` — signatures, formats, commands, and error behavior.
+- `## Инварианты` — rules that must always hold.
+- `## Граничные случаи` — empty, stale, duplicate, concurrent, and failure cases.
+- `## Влияние на связанные компоненты` — modules, tests, docs, and configuration
+  affected.
+- `## Вне scope` — work explicitly excluded from this issue.
+- `## Критерии приёмки` — verifiable checks that prove the task is done.
+
 The executable source of workflow rules is
 `src/orch/services/standards/policy.py`. Architecture and code rules live in the
 external `audit` skill; do not copy them here.
