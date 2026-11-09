@@ -6,6 +6,7 @@ from orch.services.github.service import (
     delete_branch,
     edit_labels,
     find_open_pr,
+    find_open_pr_for_issue,
     get_issue,
     get_pr_status,
     issue_is_open,
@@ -18,7 +19,7 @@ from orch.services.github.service import (
 
 __all__ = (
     "comment_issue", "create_pr", "delete_branch", "edit_labels",
-    "find_open_pr", "get_issue", "get_pr_status", "issue_is_open",
-    "list_issue_comments", "list_ready_issues", "mark_bot_body",
-    "merge_pr", "resolve_token",
+    "find_open_pr", "find_open_pr_for_issue", "get_issue", "get_pr_status",
+    "issue_is_open", "list_issue_comments", "list_ready_issues",
+    "mark_bot_body", "merge_pr", "resolve_token",
 )

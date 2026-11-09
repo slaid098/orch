@@ -85,36 +85,31 @@ def test_format_pr_body_has_required_sections() -> None:
     assert "## Почему\nПользователю нужен способ проверить версию." in body
     assert "## На что обратить внимание\n—" in body
     assert "## Что осталось\nДобавить тест." in body
-    assert body.rstrip().endswith("Closes #7")
+    assert "Closes #7" in body
+    assert "<!-- orch:issue=7 -->" in body
 
 
-@pytest.mark.parametrize(
-    ("title", "issue", "branch"),
-    [
-        (
-            "feat(cli): add version flag",
-            7,
-            "feat/cli/issue-7-add-version-flag",
-        ),
-        (
-            "fix(worker): keep retries clean",
-            42,
-            "fix/worker/issue-42-keep-retries-clean",
-        ),
-    ],
-)
-def test_branch_name_uses_issue_title(
-    title: str,
-    issue: int,
-    branch: str,
-) -> None:
-    assert branch_name(title, issue) == branch
-    assert validate_branch(branch, issue) == branch
+def test_branch_name_is_stable_across_title_changes() -> None:
+    assert branch_name(7) == "orch/issue-7"
+    assert validate_branch("orch/issue-7", 7) == "orch/issue-7"
+
+
+def test_validate_branch_accepts_a_legacy_branch() -> None:
+    branch = "feat/cli/issue-7-add-version-flag"
+
+    assert validate_branch(branch, 7) == branch
 
 
 def test_validate_branch_rejects_foreign_issue_number() -> None:
     with pytest.raises(StandardsError):
         validate_branch("feat/cli/issue-8-add-version-flag", 7)
+    with pytest.raises(StandardsError):
+        validate_branch("orch/issue-8", 7)
+
+
+def test_validate_branch_rejects_an_unrelated_branch() -> None:
+    with pytest.raises(StandardsError, match="Branch must be"):
+        validate_branch("not-a-branch", 7)
 
 
 def test_load_handoff_reads_and_validates(tmp_path: Path) -> None:
@@ -150,11 +145,6 @@ def test_validate_title_rejects_multiline_input() -> None:
 def test_issue_body_must_not_be_empty() -> None:
     with pytest.raises(StandardsError, match="must not be empty"):
         validate_issue_body("  ")
-
-
-def test_branch_name_requires_latin_description() -> None:
-    with pytest.raises(StandardsError, match="latin"):
-        branch_name("feat(cli): !!!", 7)
 
 
 def test_load_handoff_rejects_invalid_json(tmp_path: Path) -> None:

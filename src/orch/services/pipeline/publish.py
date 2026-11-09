@@ -6,7 +6,7 @@ from orch.config.logger import get_logger
 from orch.exceptions.github import GitHubError
 from orch.exceptions.pipeline import PublicationError
 from orch.schemas.config.types import Config
-from orch.schemas.github.types import Issue
+from orch.schemas.github.types import Issue, PullRequestRef
 from orch.schemas.worker.types import WorkerResult
 from orch.services import git as gitops
 from orch.services import github
@@ -31,6 +31,30 @@ def _find_open_pr(
     except GitHubError as ex:
         log.bind(branch=branch, error=str(ex)).warning(
             "Could not check for an existing pull request"
+        )
+        if strict:
+            raise
+        return None
+
+
+def _find_open_pr_for_issue(
+    repo: str,
+    issue_number: int,
+    token: str,
+    *,
+    preferred_head: str | None = None,
+    strict: bool = False,
+) -> PullRequestRef | None:
+    try:
+        return github.find_open_pr_for_issue(
+            repo,
+            issue_number,
+            token,
+            preferred_head=preferred_head,
+        )
+    except GitHubError as ex:
+        log.bind(issue=issue_number, error=str(ex)).warning(
+            "Could not check for an existing pull request for the issue"
         )
         if strict:
             raise

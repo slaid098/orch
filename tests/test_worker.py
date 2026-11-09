@@ -20,6 +20,8 @@ from orch.schemas.standards.types import Handoff
 from orch.schemas.worker.types import WorkerResult
 from orch.services.worker import service as worker
 
+_BRANCH = "orch/issue-7"
+
 
 def _config(tmp_path: Path, *, attempt: int = 1) -> Config:
     del attempt
@@ -139,12 +141,13 @@ def test_run_worker_success(
         run_dir,
         source_path=source,
         workspace_path=workspace,
+        branch=_BRANCH,
         attempt=2,
         previous_error="first failed",
         timeout_seconds=60,
     )
 
-    assert result.branch == "feat/cli/issue-7-add-version-flag"
+    assert result.branch == _BRANCH
     assert result.handoff == _handoff()
     assert result.bundle_path == run_dir / "result.bundle"
     assert starts[0]["image"] == "image:latest"
@@ -201,6 +204,7 @@ def test_run_worker_rejects_no_changes_and_stops_container(
             run_dir,
             source_path=source,
             workspace_path=tmp_path / "workspace",
+            branch=_BRANCH,
             timeout_seconds=60,
         )
 
@@ -255,6 +259,7 @@ def test_run_worker_reports_failed_tests(
             run_dir,
             source_path=source,
             workspace_path=tmp_path / "workspace",
+            branch=_BRANCH,
             timeout_seconds=60,
         )
 
@@ -601,6 +606,7 @@ def _run_stream_worker(
         run_dir,
         source_path=source,
         workspace_path=tmp_path / "workspace",
+        branch=_BRANCH,
         timeout_seconds=60,
         feedback=feedback,  # type: ignore[arg-type]
     )
@@ -645,11 +651,12 @@ def test_run_worker_uses_stream_session(
         run_dir,
         source_path=source,
         workspace_path=tmp_path / "workspace",
+        branch=_BRANCH,
         timeout_seconds=60,
         feedback=feedback,  # type: ignore[arg-type]
     )
 
-    assert result.branch == "feat/cli/issue-7-add-version-flag"
+    assert result.branch == _BRANCH
     assert captured["feedback"] is feedback
     args = captured["args"]
     assert isinstance(args, tuple)

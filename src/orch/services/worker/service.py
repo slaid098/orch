@@ -17,7 +17,7 @@ from orch.schemas.worker.types import WorkerResult
 from orch.services import mcp
 from orch.services.docker import exec_in, start_worker, stop
 from orch.services.feedback.service import CommentFeed
-from orch.services.standards import branch_name, load_handoff
+from orch.services.standards import load_handoff
 from orch.services.watchdog.service import Watchdog
 
 log = get_logger(component="worker")
@@ -107,6 +107,7 @@ def run_worker(
     *,
     source_path: Path,
     workspace_path: Path,
+    branch: str,
     attempt: int = 1,
     previous_error: str | None = None,
     timeout_seconds: int,
@@ -122,6 +123,7 @@ def run_worker(
         run_dir: Host directory mounted at ``/out``.
         source_path: Clean source checkout mounted read-only at ``/src``.
         workspace_path: Persistent host workspace mounted at ``/work``.
+        branch: Branch to create or reuse; the caller resolves it once.
         attempt: One-based attempt number.
         previous_error: Failure from the previous attempt, used for handoff.
         timeout_seconds: Hard budget for this whole attempt.
@@ -141,7 +143,6 @@ def run_worker(
     run_dir.mkdir(parents=True, exist_ok=True)
     workspace_path.mkdir(parents=True, exist_ok=True)
     (run_dir / "handoff.json").unlink(missing_ok=True)
-    branch = branch_name(issue.title, issue.number)
     prompt = build_prompt(
         config,
         issue,

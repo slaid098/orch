@@ -4,15 +4,19 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
+from typing import Any
 from urllib.parse import quote
 
 from orch.config.logger import get_logger
+from orch.constants.standards import PR_ISSUE_MARKER
 from orch.exceptions.github import GitHubError
 from orch.schemas.github.types import (
     CheckResult,
     Comment,
     Issue,
+    PullRequestRef,
     PullRequestStatus,
 )
 
@@ -285,6 +289,106 @@ def find_open_pr(repo: str, head: str, token: str) -> str | None:
             if item.get("headRefName") == head and item.get("url"):
                 return str(item["url"])
         return None
+
+
+def find_open_pr_for_issue(
+    repo: str,
+    issue_number: int,
+    token: str,
+    *,
+    preferred_head: str | None = None,
+) -> PullRequestRef | None:
+    """Return the open pull request that belongs to an issue.
+
+    The preferred head is checked first. Otherwise, open pull requests are
+    matched by the hidden orch marker, a GitHub closing keyword, or a legacy
+    head branch that contains the issue number. Multiple matches are ambiguous
+    and raise instead of guessing.
+
+    Args:
+        repo: Repository in ``owner/name`` form.
+        issue_number: GitHub issue number.
+        token: GitHub token.
+        preferred_head: Branch that a new run would use, if any.
+
+    Returns:
+        The matching pull request, or ``None`` when there is no open one.
+
+    Raises:
+        GitHubError: If the lookup fails, returns invalid JSON, or finds more
+            than one open pull request for the issue.
+    """
+    if preferred_head:
+        url = find_open_pr(repo, preferred_head, token)
+        if url:
+            return PullRequestRef(
+                number=_pr_number(url),
+                url=url,
+                head_ref=preferred_head,
+            )
+    matches = [
+        item
+        for item in _list_open_prs(repo, token)
+        if _belongs_to_issue(item, issue_number)
+    ]
+    if not matches:
+        return None
+    if len(matches) > 1:
+        urls = ", ".join(str(item.get("url") or "?") for item in matches)
+        raise GitHubError(
+            f"Multiple open pull requests reference issue #{issue_number}: {urls}"
+        )
+    item = matches[0]
+    url = str(item.get("url") or "")
+    head = str(item.get("headRefName") or "")
+    number = item.get("number")
+    if not url or not head or not isinstance(number, int):
+        raise GitHubError("Open pull request is missing its number, URL, or head branch")
+    return PullRequestRef(number=number, url=url, head_ref=head)
+
+
+def _list_open_prs(repo: str, token: str) -> list[dict[str, Any]]:
+    """Return all open pull requests with the fields needed for matching."""
+    output = _run_gh(
+        [
+            "pr",
+            "list",
+            "--repo",
+            repo,
+            "--state",
+            "open",
+            "--limit",
+            "500",
+            "--json",
+            "number,url,headRefName,body,isCrossRepository",
+        ],
+        token,
+    )
+    try:
+        data = json.loads(output or "[]")
+    except json.JSONDecodeError as ex:
+        log.bind(error=ex, error_type=type(ex).__name__).error(
+            "Could not parse gh pr list output"
+        )
+        raise GitHubError("Could not parse gh pr list output") from ex
+    if not isinstance(data, list):
+        raise GitHubError("Could not parse gh pr list output")
+    return [item for item in data if isinstance(item, dict)]
+
+
+def _belongs_to_issue(item: dict[str, Any], issue_number: int) -> bool:
+    """Return whether one open pull request references the issue."""
+    if item.get("isCrossRepository") is True:
+        return False
+    body = str(item.get("body") or "")
+    if PR_ISSUE_MARKER.format(issue_number=issue_number) in body:
+        return True
+    if re.search(rf"(?mi)^(?:closes|fixes|resolves)\s+#{issue_number}\s*$", body):
+        return True
+    head = str(item.get("headRefName") or "")
+    return (
+        re.search(rf"(?:^|/)issue-{issue_number}(?:-|$)", head) is not None
+    )
 
 
 def delete_branch(repo: str, branch: str, token: str) -> None:
