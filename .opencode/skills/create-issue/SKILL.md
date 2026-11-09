@@ -11,22 +11,53 @@ bypass its rules.
 
 ## Workflow
 
-1. Determine **what** must change and **why** it matters. Ask only when the
-   request is genuinely ambiguous.
-2. Draft an English title in `type(scope): description` form. The type, scope,
-   and description are mandatory; the validator will reject invalid input.
-3. Write the body to a temporary file outside the repository using this
-   structure:
+1. **Research the code first.** Read the modules, tests, configuration, and
+   README that the task touches. Identify current behavior, call sites, and
+   constraints. Every statement in the issue must be verifiable in the
+   repository; never invent file paths, symbols, or behavior.
+2. **Resolve open decisions with the user.** Ask concise questions about
+   behavior, scope boundaries, and trade-offs that cannot be derived from the
+   code. Wait for answers. If the request is already fully specified, say so and
+   continue without inventing extra questions.
+3. **Draft the title.** Use English `type(scope): description` form. Type, scope,
+   and description are mandatory; the validator rejects invalid input.
+4. **Write the body** to a temporary file outside the repository. Use exactly
+   these eight level-two sections, in this order, with no extra `##` headings:
 
    ```markdown
-   ## Что сделать
-   Конкретное изменение или результат.
+   ## Контекст
+   Current behavior, affected files and symbols, and why the task exists.
 
-   ## Почему
-   Проблема или причина, по которой это нужно.
+   ## Задача
+   The exact change and the observable result. No implementation diary.
+
+   ## Контракты
+   Signatures, input/output formats, CLI or configuration shapes, and error
+   behavior that must stay stable or change.
+
+   ## Инварианты
+   Rules that must always hold: ordering, atomicity, permissions, idempotency,
+   fail-closed behavior.
+
+   ## Граничные случаи
+   Empty, missing, stale, duplicate, concurrent, and failure cases with the
+   required reaction for each.
+
+   ## Влияние на связанные компоненты
+   Modules, tests, documentation, configuration, and user-visible behavior
+   affected by the change.
+
+   ## Вне scope
+   Work explicitly excluded from this issue to prevent scope creep.
+
+   ## Критерии приёмки
+   Verifiable checks: commands, tests, expected outputs, manual scenarios.
    ```
 
-4. From the repository root, validate before creating:
+   The text above describes what each section must contain; write the actual
+   body in Russian. Every section must be non-empty. Use concrete file paths,
+   symbols, and commands; keep code-like identifiers in English.
+5. **Validate** from the repository root:
 
    ```bash
    uv run python scripts/create_issue.py \
@@ -35,10 +66,10 @@ bypass its rules.
      --validate-only
    ```
 
-5. If validation fails, rewrite the title and/or body and run the same command
-   again. A title must be regenerated, not patched with filler. Do not create the
-   issue until validation passes.
-6. Create the issue with the same command, without `--validate-only`:
+6. If validation fails, rewrite the title and/or body and run the same command
+   again. Do not create the issue until validation passes. Never pad a broken
+   title or body with placeholders.
+7. **Create** the issue with the same command, without `--validate-only`:
 
    ```bash
    uv run python scripts/create_issue.py \
@@ -48,13 +79,13 @@ bypass its rules.
 
    The script validates again and only then calls `gh issue create`. It adds the
    `agent:queued` label by default.
-
-7. Report the created issue URL and title. Stop if validation cannot be fixed;
-   ask the user instead of creating an invalid issue.
+8. Report the created issue URL and title.
 
 ## Rules
 
 - Never call `gh issue create` directly for this repository.
+- Never leave `TBD`, `TODO`, `???`, or similar placeholders in the body.
 - Never use `needs-human` to work around an invalid title.
-- Keep the title English and the body focused on what and why.
+- Keep the title English and the body Russian.
 - Do not put credentials, tokens, or environment dumps in the issue.
+- If the task is too broad for one issue, split it and ask the user.

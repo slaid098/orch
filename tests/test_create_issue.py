@@ -7,13 +7,21 @@ import pytest
 
 from scripts import create_issue
 
+_ISSUE_BODY = (
+    "## Контекст\nТекущая проверка описана в `policy.py`.\n\n"
+    "## Задача\nДобавить проверку заголовка.\n\n"
+    "## Контракты\nВалидатор возвращает исходный текст.\n\n"
+    "## Инварианты\nПорядок разделов фиксирован.\n\n"
+    "## Граничные случаи\nПустое тело отклоняется.\n\n"
+    "## Влияние на связанные компоненты\nТесты и README.\n\n"
+    "## Вне scope\nИзменение заголовка.\n\n"
+    "## Критерии приёмки\n`uv run pytest` проходит.\n"
+)
+
 
 def _body_file(tmp_path: Path) -> Path:
     path = tmp_path / "body.md"
-    path.write_text(
-        "## Что сделать\nДобавить проверку.\n\n## Почему\nНужна защита.\n",
-        encoding="utf-8",
-    )
+    path.write_text(_ISSUE_BODY, encoding="utf-8")
     return path
 
 
@@ -44,6 +52,26 @@ def test_validate_only_does_not_call_gh(
     assert code == 0
     assert not called
     assert "OK: test(standards): validate issue creation" in capsys.readouterr().out
+
+
+def test_old_two_section_body_is_rejected(tmp_path: Path) -> None:
+    path = tmp_path / "body.md"
+    path.write_text(
+        "## Что сделать\nДобавить проверку.\n\n## Почему\nНужна защита.\n",
+        encoding="utf-8",
+    )
+
+    code = create_issue.main(
+        [
+            "--title",
+            "test(standards): validate issue creation",
+            "--body-file",
+            str(path),
+            "--validate-only",
+        ]
+    )
+
+    assert code == 2
 
 
 def test_invalid_title_returns_policy_error(

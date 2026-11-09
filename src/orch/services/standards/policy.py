@@ -62,7 +62,7 @@ def validate_title(title: str) -> str:
 
 
 def validate_issue_body(body: str) -> str:
-    """Validate the issue body's required what/why sections.
+    """Validate the fixed eight-section issue contract.
 
     Args:
         body: Markdown issue body.
@@ -71,33 +71,66 @@ def validate_issue_body(body: str) -> str:
         The stripped body.
 
     Raises:
-        StandardsError: If a required heading is missing, duplicated, or empty.
+        StandardsError: If the body is empty, its level-two headings do not
+            match the required ordered set, it starts with content before the
+            first heading, or any section is empty.
     """
     text = body.strip()
     if not text:
         raise StandardsError("Issue body must not be empty")
 
-    positions = []
-    for heading in ISSUE_BODY_HEADINGS:
-        first = text.find(heading)
-        if first < 0:
-            raise StandardsError(f"Issue body is missing heading {heading!r}")
-        if text.find(heading, first + len(heading)) >= 0:
-            raise StandardsError(f"Issue body contains duplicate heading {heading!r}")
-        positions.append(first)
+    lines = text.splitlines()
+    headings = _heading_positions(lines)
+    found = [heading for _, heading in headings]
+    expected = list(ISSUE_BODY_HEADINGS)
+    if found != expected:
+        _raise_heading_error(found, expected)
+    if "\n".join(lines[: headings[0][0]]).strip():
+        raise StandardsError(f"Issue body must start with {expected[0]!r}")
 
-    if positions != sorted(positions):
-        raise StandardsError(
-            "Issue body headings must be ordered: "
-            + ", ".join(ISSUE_BODY_HEADINGS)
-        )
-
-    for index, heading in enumerate(ISSUE_BODY_HEADINGS):
-        start = positions[index] + len(heading)
-        end = positions[index + 1] if index + 1 < len(positions) else len(text)
-        if not text[start:end].strip():
+    for index, (position, heading) in enumerate(headings):
+        end = headings[index + 1][0] if index + 1 < len(headings) else len(lines)
+        if not "\n".join(lines[position + 1 : end]).strip():
             raise StandardsError(f"Issue body section {heading!r} must not be empty")
     return text
+
+
+def _heading_positions(lines: list[str]) -> list[tuple[int, str]]:
+    """Return level-two heading lines outside fenced code blocks."""
+    headings: list[tuple[int, str]] = []
+    in_fence = False
+    for index, line in enumerate(lines):
+        if line.startswith("```"):
+            in_fence = not in_fence
+            continue
+        if not in_fence and line.startswith("## "):
+            headings.append((index, line.strip()))
+    return headings
+
+
+def _raise_heading_error(found: list[str], expected: list[str]) -> None:
+    """Raise a precise error for a heading mismatch."""
+    duplicates = sorted({heading for heading in found if found.count(heading) > 1})
+    if duplicates:
+        raise StandardsError(
+            "Issue body contains duplicate headings: "
+            + ", ".join(repr(heading) for heading in duplicates)
+        )
+    missing = [heading for heading in expected if heading not in found]
+    if missing:
+        raise StandardsError(
+            "Issue body is missing headings: "
+            + ", ".join(repr(heading) for heading in missing)
+        )
+    unexpected = [heading for heading in found if heading not in expected]
+    if unexpected:
+        raise StandardsError(
+            "Issue body contains unexpected headings: "
+            + ", ".join(repr(heading) for heading in unexpected)
+        )
+    raise StandardsError(
+        "Issue body headings must be exactly: " + ", ".join(expected)
+    )
 
 
 def branch_name(issue_number: int) -> str:

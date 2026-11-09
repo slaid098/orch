@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from orch.constants.standards import ISSUE_BODY_HEADINGS
 from orch.exceptions.standards import StandardsError
 from orch.schemas.standards.types import Handoff
 from orch.services.standards import (
@@ -46,27 +47,65 @@ def test_validate_title_rejects_invalid_titles(title: str) -> None:
         validate_title(title)
 
 
-def test_issue_body_requires_what_and_why() -> None:
-    body = (
-        "## Что сделать\nДобавить проверку заголовка.\n\n"
-        "## Почему\nНевалидные issue не должны запускать worker.\n"
+def _issue_body() -> str:
+    return (
+        "## Контекст\n"
+        "Сейчас валидатор принимает только два раздела.\n\n"
+        "## Задача\n"
+        "Требовать восемь разделов и отклонять лишние.\n\n"
+        "## Контракты\n"
+        "`validate_issue_body` возвращает исходный текст.\n\n"
+        "## Инварианты\n"
+        "Порядок разделов фиксирован.\n\n"
+        "## Граничные случаи\n"
+        "Пустое тело и пустой раздел отклоняются.\n\n"
+        "## Влияние на связанные компоненты\n"
+        "Обновить `scripts/create_issue.py`, skill и README.\n\n"
+        "## Вне scope\n"
+        "Изменение заголовка issue.\n\n"
+        "## Критерии приёмки\n"
+        "`uv run pytest` проходит.\n"
+    )
+
+
+def test_issue_body_requires_the_eight_sections() -> None:
+    body = _issue_body()
+
+    assert validate_issue_body(body) == body.strip()
+    for heading in ISSUE_BODY_HEADINGS:
+        assert heading in body
+
+
+def test_issue_body_allows_heading_like_lines_inside_code_fences() -> None:
+    body = _issue_body().replace(
+        "`uv run pytest` проходит.",
+        "```bash\n## not a heading\nuv run pytest\n```",
     )
 
     assert validate_issue_body(body) == body.strip()
-    assert body.startswith("## Что сделать\n")
-    assert "## Почему\n" in body
 
 
 @pytest.mark.parametrize(
     "body",
     [
         "Просто текст.",
-        "## Что сделать\n\n## Почему\nПричина.",
-        "## Почему\nПричина.\n\n## Что сделать\nДействие.",
-        "## Что сделать\nДействие.\n\n## Что сделать\nЕщё.\n\n## Почему\nПричина.",
+        _issue_body().replace(
+            "## Инварианты\nПорядок разделов фиксирован.\n\n",
+            "",
+        ),
+        _issue_body().replace(
+            "## Контекст\nСейчас валидатор принимает только два раздела.\n\n"
+            "## Задача\nТребовать восемь разделов и отклонять лишние.",
+            "## Задача\nТребовать восемь разделов и отклонять лишние.\n\n"
+            "## Контекст\nСейчас валидатор принимает только два раздела.",
+        ),
+        _issue_body().replace("## Задача\n", "## Задача\nДубликат.\n\n## Задача\n"),
+        _issue_body() + "\n## Дополнительно\nЛишнее.\n",
+        _issue_body().replace("Порядок разделов фиксирован.", " "),
+        "Вступление.\n\n" + _issue_body(),
     ],
 )
-def test_issue_body_rejects_incomplete_sections(body: str) -> None:
+def test_issue_body_rejects_invalid_contract(body: str) -> None:
     with pytest.raises(StandardsError):
         validate_issue_body(body)
 
