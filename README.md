@@ -213,6 +213,11 @@ The daemon runs at most `max_workers` containers (default 2, maximum 3) and
 waits for active workers on shutdown. On startup it removes orphan containers
 from a previous process and re-queues issues left in `agent:running`.
 
+Only one orch process may use a `data_dir` at a time. A second daemon or
+`--once` run exits immediately with the PID of the process that holds the lock.
+The lock is held by the operating system and is released automatically after a
+crash, so there is no stale lock to clean up by hand.
+
 ## Live smoke test
 
 Verify the complete issue-to-PR path once, on a real worker container, without
