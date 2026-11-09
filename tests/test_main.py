@@ -19,6 +19,11 @@ def _config(tmp_path: Path) -> Config:
     )
 
 
+@pytest.fixture(autouse=True)
+def _passing_preflight(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(orch_main, "_preflight", lambda _config, **_kwargs: True)
+
+
 def test_no_arguments_starts_the_daemon(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -64,6 +69,8 @@ def test_debug_mode_runs_one_issue(
     [
         ["--issue", "7"],
         ["--once"],
+        ["--check", "--once"],
+        ["--check", "--issue", "7", "--once"],
     ],
 )
 def test_debug_flags_must_be_used_together(argv: list[str]) -> None:
@@ -81,6 +88,7 @@ def test_help_lists_only_debug_flags(capsys: pytest.CaptureFixture[str]) -> None
     out = capsys.readouterr().out
     assert "--issue" in out
     assert "--once" in out
+    assert "--check" in out
     for command in ("status", "build-image", "logs"):
         assert command not in out
 
@@ -129,6 +137,65 @@ def test_busy_instance_returns_exit_code_one(
         raise InstanceLockError("another instance holds the lock")
 
     monkeypatch.setattr(orch_main, "instance_lock", busy)
+
+    assert orch_main.main([]) == 1
+
+
+def test_check_runs_preflight_without_the_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    calls: list[tuple[Config, bool]] = []
+
+    monkeypatch.setattr(orch_main, "load_config", lambda _path: config)
+    monkeypatch.setattr(orch_main, "setup_logging", lambda _config: None)
+    monkeypatch.setattr(
+        orch_main,
+        "_preflight",
+        lambda cfg, *, notify_owner: calls.append((cfg, notify_owner)) or True,
+    )
+    monkeypatch.setattr(
+        orch_main,
+        "instance_lock",
+        lambda *_args, **_kwargs: pytest.fail("--check must not take the lock"),
+    )
+
+    assert orch_main.main(["--check"]) == 0
+    assert calls == [(config, False)]
+
+
+def test_check_failure_returns_exit_code_one(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+
+    monkeypatch.setattr(orch_main, "load_config", lambda _path: config)
+    monkeypatch.setattr(orch_main, "setup_logging", lambda _config: None)
+    monkeypatch.setattr(
+        orch_main,
+        "_preflight",
+        lambda _config, **_kwargs: False,
+    )
+
+    assert orch_main.main(["--check"]) == 1
+
+
+def test_failed_preflight_blocks_initialization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+
+    monkeypatch.setattr(orch_main, "load_config", lambda _path: config)
+    monkeypatch.setattr(orch_main, "setup_logging", lambda _config: None)
+    monkeypatch.setattr(orch_main, "_preflight", lambda _config, **_kwargs: False)
+    monkeypatch.setattr(
+        orch_main,
+        "initialize",
+        lambda _config: pytest.fail("initialize must not run after a failed preflight"),
+    )
 
     assert orch_main.main([]) == 1
 

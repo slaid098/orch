@@ -79,6 +79,19 @@ def ensure_user(token: str, expected: str) -> None:
     log.info("GitHub account: {}", login)
 
 
+def check_repo(repo: str, token: str) -> None:
+    """Verify that the token can read the repository.
+
+    Args:
+        repo: Repository in ``owner/name`` form.
+        token: GitHub token.
+
+    Raises:
+        GitHubError: If the repository is missing or not readable.
+    """
+    _run_gh(["repo", "view", repo, "--json", "nameWithOwner"], token)
+
+
 def ensure_labels(
     repo: str,
     token: str,

@@ -92,6 +92,12 @@ def _parse_config(
     retention_days = _bounded_int(
         raw.get("retention_days", 7), "retention_days", minimum=1, maximum=365
     )
+    min_free_disk_gb = _bounded_int(
+        raw.get("min_free_disk_gb", 5),
+        "min_free_disk_gb",
+        minimum=1,
+        maximum=1000,
+    )
     return Config(
         repo=repo,
         labels=labels,
@@ -100,6 +106,7 @@ def _parse_config(
         poll_interval_seconds=poll_interval_seconds,
         max_workers=max_workers,
         retention_days=retention_days,
+        min_free_disk_gb=min_free_disk_gb,
         gh_token=_resolve_token(settings),
         telegram=telegram,
         feedback=feedback,

@@ -311,7 +311,7 @@ def start_reviewer(
     Raises:
         DockerError: If the image is missing or the container cannot start.
     """
-    if not _image_exists(image):
+    if not image_exists(image):
         raise DockerError(f"Reviewer image {image!r} does not exist. Build it with Docker.")
 
     gateway_ip = _ensure_review_isolation(image)
@@ -365,7 +365,7 @@ def start_worker(
     Returns:
         The container ID.
     """
-    if not _image_exists(image):
+    if not image_exists(image):
         raise DockerError(f"Worker image {image!r} does not exist. Build it with Docker.")
 
     _prepare_workspace_dir(workspace_path)
@@ -501,10 +501,20 @@ def logs(name: str, *, tail: int = 100) -> str:
     return ((result.stdout or "") + (result.stderr or "")).strip()
 
 
-def _image_exists(image: str) -> bool:
+def image_exists(image: str) -> bool:
     """Return whether a Docker image is available locally."""
     result = _run(
         ["docker", "image", "inspect", image],
+        timeout=30,
+        check=False,
+    )
+    return result.returncode == 0
+
+
+def daemon_available() -> bool:
+    """Return whether the Docker daemon accepts commands."""
+    result = _run(
+        ["docker", "info", "--format", "{{.ServerVersion}}"],
         timeout=30,
         check=False,
     )
