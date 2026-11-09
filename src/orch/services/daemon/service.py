@@ -8,13 +8,12 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
 from orch.config.logger import get_logger, logger
-from orch.exceptions.github import GitHubError
+from orch.exceptions.forge import ForgeError
 from orch.schemas.config.types import Config
 from orch.schemas.github.types import Issue
 from orch.schemas.pipeline.types import RunOutcome
-from orch.services import github, notify, store
+from orch.services import forge, notify, store
 from orch.services.docker import cleanup_managed
-from orch.services.github.service import ensure_labels, ensure_user
 from orch.services.pipeline import run_issue
 from orch.services.retention import prune_runs, prune_workspaces
 
@@ -53,12 +52,12 @@ def initialize(config: Config) -> str:
         config: Orchestrator configuration.
 
     Returns:
-        GitHub token used by this process.
+        Forge token used by this process.
     """
-    token = github.resolve_token(config.repo.owner, config.gh_token)
-    ensure_user(token, config.repo.owner)
-    ensure_labels(
-        config.repo.full_name,
+    token = forge.resolve_token(config)
+    forge.ensure_user(config, token)
+    forge.ensure_labels(
+        config,
         token,
         [
             (config.labels.queued, "0e8a16", "Queued for orch"),
@@ -86,19 +85,19 @@ def run_once(config: Config, token: str, issue_number: int) -> int:
 
     Args:
         config: Orchestrator configuration.
-        token: GitHub token.
+        token: Forge token.
         issue_number: Issue to process.
 
     Returns:
         Process exit code.
     """
     try:
-        issue = github.get_issue(config.repo.full_name, issue_number, token)
-    except GitHubError as ex:
+        issue = forge.get_issue(config, issue_number, token)
+    except ForgeError as ex:
         log.bind(error=ex, error_type=type(ex).__name__).error("Could not fetch issue")
         notify.notify_error(
             config,
-            stage="github",
+            stage="forge",
             error=ex,
             issue_number=issue_number,
         )
@@ -145,7 +144,7 @@ def run_daemon(config: Config, token: str) -> int:
 
     Args:
         config: Orchestrator configuration.
-        token: GitHub token.
+        token: Forge token.
 
     Returns:
         Process exit code.
@@ -172,12 +171,12 @@ def run_daemon(config: Config, token: str) -> int:
                 _reap_finished(active, config, token)
 
                 try:
-                    issues = github.list_ready_issues(
-                        config.repo.full_name,
+                    issues = forge.list_ready_issues(
+                        config,
                         config.labels.queued,
                         token,
                     )
-                except GitHubError as ex:
+                except ForgeError as ex:
                     log.bind(error=ex, error_type=type(ex).__name__).error("Poll failed; retrying")
                     now = time.monotonic()
                     if poll_failed_at is None or now - poll_failed_at >= 1800:
@@ -194,7 +193,7 @@ def run_daemon(config: Config, token: str) -> int:
                     notify.notify_recovered(
                         config,
                         component="daemon-poll",
-                        detail="GitHub polling works again.",
+                        detail="Forge polling works again.",
                     )
                     poll_failed_at = None
 
@@ -333,23 +332,23 @@ def _queue_size(config: Config, token: str | None) -> int:
         return 0
     try:
         return len(
-            github.list_ready_issues(
-                config.repo.full_name,
+            forge.list_ready_issues(
+                config,
                 config.labels.queued,
                 token,
             )
         )
-    except GitHubError as ex:
+    except ForgeError as ex:
         log.bind(error=ex, error_type=type(ex).__name__).warning(
             "Could not count queued issues for the notification"
         )
         return 0
 
 
-def _claim_issue(config: Config, issue: github.Issue, token: str) -> bool:
+def _claim_issue(config: Config, issue: Issue, token: str) -> bool:
     try:
-        github.edit_labels(
-            config.repo.full_name,
+        forge.edit_labels(
+            config,
             issue.number,
             token,
             add=(config.labels.running,),
@@ -359,7 +358,7 @@ def _claim_issue(config: Config, issue: github.Issue, token: str) -> bool:
                 config.labels.pr_open,
             ),
         )
-    except GitHubError as ex:
+    except ForgeError as ex:
         log.bind(
             issue=issue.number,
             error=ex,
@@ -392,12 +391,12 @@ def _reconcile_startup(config: Config, token: str) -> None:
         log.warning("Marked {} interrupted run(s) as interrupted", interrupted)
 
     try:
-        issues = github.list_ready_issues(
-            config.repo.full_name,
+        issues = forge.list_ready_issues(
+            config,
             config.labels.running,
             token,
         )
-    except GitHubError as ex:
+    except ForgeError as ex:
         log.bind(error=ex, error_type=type(ex).__name__).warning(
             "Could not reconcile running issues"
         )
@@ -410,22 +409,22 @@ def _reconcile_startup(config: Config, token: str) -> None:
 
     for issue in issues:
         try:
-            github.comment_issue(
-                config.repo.full_name,
+            forge.comment_issue(
+                config,
                 issue.number,
                 token,
-                github.mark_bot_body(
+                forge.mark_bot_body(
                     "orch был перезапущен во время работы. Issue возвращена в очередь."
                 ),
             )
-            github.edit_labels(
-                config.repo.full_name,
+            forge.edit_labels(
+                config,
                 issue.number,
                 token,
                 add=(config.labels.queued,),
                 remove=(config.labels.running, config.labels.needs_human),
             )
-        except GitHubError as ex:
+        except ForgeError as ex:
             log.bind(
                 issue=issue.number,
                 error=ex,

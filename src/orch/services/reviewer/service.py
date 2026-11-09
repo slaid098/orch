@@ -18,6 +18,7 @@ from orch.services.agent import run_session
 from orch.services.docker import start_reviewer, stop
 from orch.services.mcp import allowed_tools as mcp_allowed_tools
 from orch.services.mcp import write_reviewer_config
+from orch.services.skills import resolve as resolve_skills
 from orch.services.watchdog.service import Watchdog
 from orch.services.worker import autocompact_tokens
 
@@ -375,6 +376,7 @@ def _run_launch(
             model=model,
             context_tokens=autocompact_tokens(config.reviewer.autocompact),
             codegraph_enabled=config.mcp.enabled and config.mcp.codegraph,
+            skills=resolve_skills(config, config.reviewer.skills),
         )
     except Exception as ex:
         raise ReviewerError(f"Could not start reviewer container: {ex}") from ex

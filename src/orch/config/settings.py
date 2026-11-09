@@ -5,6 +5,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -36,6 +37,7 @@ class _RuntimeSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="ORCH_", extra="ignore")
 
     gh_token: str | None = None
+    forgejo_token: str | None = None
 
 
 def load_config(path: Path | None = None) -> Config:
@@ -85,6 +87,7 @@ def _parse_config(
     reviewer = _parse_reviewer(raw)
     mcp = _parse_mcp(raw)
     data_dir = _resolve_path(str(raw.get("data_dir") or _default_data_dir()), base_dir)
+    skills_dir = _resolve_path(str(raw.get("skills_dir") or "skills"), base_dir)
     poll_interval_seconds = _positive_int(
         raw.get("poll_interval_seconds", 30), "poll_interval_seconds"
     )
@@ -109,12 +112,14 @@ def _parse_config(
         labels=labels,
         worker=worker,
         data_dir=data_dir,
+        skills_dir=skills_dir,
         poll_interval_seconds=poll_interval_seconds,
         max_workers=max_workers,
         retention_days=retention_days,
         workspace_retention_days=workspace_retention_days,
         min_free_disk_gb=min_free_disk_gb,
         gh_token=_resolve_token(settings),
+        forgejo_token=_resolve_forgejo_token(settings),
         telegram=telegram,
         feedback=feedback,
         watchdog=watchdog,
@@ -136,13 +141,34 @@ def _parse_repo(raw: dict[str, Any], base_dir: Path) -> RepoConfig:
         raise ConfigError(f"Repository path does not exist: {repo_path}")
     if not (repo_path / ".git").exists():
         raise ConfigError(f"Repository path is not a git checkout: {repo_path}")
+    forge = _optional_str(repo_raw, "forge", "github").lower()
+    if forge not in {"github", "forgejo"}:
+        raise ConfigError("repo.forge must be 'github' or 'forgejo'")
+    url = _nullable_str(repo_raw, "url", "repo.url") or ""
+    if forge == "forgejo":
+        _validate_forgejo_url(url)
     return RepoConfig(
         owner=owner,
         name=name,
         path=repo_path,
         base_branch=_optional_str(repo_raw, "base_branch", "main"),
         remote=_optional_str(repo_raw, "remote", "origin"),
+        forge=forge,
+        url=url.rstrip("/"),
     )
+
+
+def _validate_forgejo_url(url: str) -> None:
+    """Validate the Forgejo base URL used for API and git access."""
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ConfigError(
+            "repo.url must be an http(s) URL when repo.forge is 'forgejo'"
+        )
+    if parsed.username or parsed.password:
+        raise ConfigError("repo.url must not contain credentials")
+    if parsed.query or parsed.fragment:
+        raise ConfigError("repo.url must not contain a query or fragment")
 
 
 def _parse_labels(raw: dict[str, Any]) -> LabelsConfig:
@@ -181,6 +207,7 @@ def _parse_worker(raw: dict[str, Any]) -> WorkerConfig:
         autocompact=_parse_autocompact(worker_raw, "worker.autocompact"),
         setup_commands=setup_commands,
         test_commands=test_commands,
+        skills=_skill_names(worker_raw.get("skills", []), "worker.skills"),
     )
 
 
@@ -351,6 +378,7 @@ def _parse_reviewer(raw: dict[str, Any]) -> ReviewerConfig:
         autocompact=_parse_autocompact(reviewer_raw, "reviewer.autocompact"),
         allowed_tools=_optional_str(reviewer_raw, "allowed_tools", "Read,Grep,Glob"),
         auto_merge=_bool(reviewer_raw.get("auto_merge", False), "reviewer.auto_merge"),
+        skills=_skill_names(reviewer_raw.get("skills", []), "reviewer.skills"),
     )
 
 
@@ -495,6 +523,11 @@ def _resolve_token(settings: _RuntimeSettings) -> str | None:
     return token.strip() if token else None
 
 
+def _resolve_forgejo_token(settings: _RuntimeSettings) -> str | None:
+    token = settings.forgejo_token or os.environ.get("FORGEJO_TOKEN")
+    return token.strip() if token else None
+
+
 def _default_data_dir() -> Path:
     if os.name == "nt":
         return Path(os.environ.get("LOCALAPPDATA", Path.home())) / "orch"
@@ -539,6 +572,21 @@ def _str_tuple(value: Any, name: str) -> tuple[str, ...]:
             raise ConfigError(f"{name} must contain only non-empty strings")
         result.append(item.strip())
     return tuple(result)
+
+
+_SKILL_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+
+
+def _skill_names(value: Any, name: str) -> tuple[str, ...]:
+    """Parse and validate skill directory names."""
+    names = _str_tuple(value, name)
+    for skill in names:
+        if not _SKILL_NAME_RE.fullmatch(skill):
+            raise ConfigError(
+                f"{name} entry {skill!r} must be a lowercase skill directory "
+                "name using letters, digits, and hyphens"
+            )
+    return names
 
 
 def _positive_int(value: Any, name: str) -> int:

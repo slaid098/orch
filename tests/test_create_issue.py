@@ -158,3 +158,120 @@ def test_gh_failure_returns_error(
     )
 
     assert code == 1
+
+
+def test_create_issue_uses_forgejo(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    calls: list[tuple[str, str, str, dict[str, object]]] = []
+    monkeypatch.setenv("FORGEJO_URL", "https://git.example.test")
+    monkeypatch.setenv("FORGEJO_TOKEN", "secret")
+    monkeypatch.setattr(
+        create_issue,
+        "create_forgejo_issue",
+        lambda url, repo, token, **kwargs: calls.append(
+            (url, repo, token, kwargs)
+        )
+        or "https://git.example.test/slaid098/orch/issues/5",
+    )
+
+    code = create_issue.main(
+        [
+            "--forge",
+            "forgejo",
+            "--repo",
+            "slaid098/orch",
+            "--title",
+            "test(standards): validate issue creation",
+            "--body-file",
+            str(_body_file(tmp_path)),
+        ]
+    )
+
+    assert code == 0
+    assert calls[0][0:3] == (
+        "https://git.example.test",
+        "slaid098/orch",
+        "secret",
+    )
+    assert calls[0][3]["labels"] == ("agent:queued",)
+    assert "https://git.example.test/slaid098/orch/issues/5" in capsys.readouterr().out
+
+
+def test_forgejo_url_flag_wins_over_the_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    monkeypatch.setenv("FORGEJO_URL", "https://ignored.example.test")
+    monkeypatch.setenv("FORGEJO_TOKEN", "secret")
+    monkeypatch.setattr(
+        create_issue,
+        "create_forgejo_issue",
+        lambda url, _repo, _token, **_kwargs: calls.append(url) or "url",
+    )
+
+    code = create_issue.main(
+        [
+            "--forge",
+            "forgejo",
+            "--repo",
+            "slaid098/orch",
+            "--url",
+            "https://git.example.test",
+            "--title",
+            "test(standards): validate issue creation",
+            "--body-file",
+            str(_body_file(tmp_path)),
+        ]
+    )
+
+    assert code == 0
+    assert calls == ["https://git.example.test"]
+
+
+@pytest.mark.parametrize(
+    ("env", "args"),
+    [
+        ({"FORGEJO_TOKEN": "secret"}, ["--repo", "slaid098/orch"]),
+        ({"FORGEJO_URL": "https://git.example.test"}, ["--repo", "slaid098/orch"]),
+        (
+            {
+                "FORGEJO_URL": "https://git.example.test",
+                "FORGEJO_TOKEN": "secret",
+            },
+            [],
+        ),
+    ],
+)
+def test_forgejo_creation_requires_url_token_and_repo(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    env: dict[str, str],
+    args: list[str],
+) -> None:
+    monkeypatch.delenv("FORGEJO_URL", raising=False)
+    monkeypatch.delenv("FORGEJO_TOKEN", raising=False)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setattr(
+        create_issue,
+        "create_forgejo_issue",
+        lambda *_args, **_kwargs: pytest.fail("creation must not start"),
+    )
+
+    code = create_issue.main(
+        [
+            "--forge",
+            "forgejo",
+            "--title",
+            "test(standards): validate issue creation",
+            "--body-file",
+            str(_body_file(tmp_path)),
+            *args,
+        ]
+    )
+
+    assert code == 1

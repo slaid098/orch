@@ -9,7 +9,7 @@ from orch.config.logger import get_logger
 from orch.schemas.config.types import Config
 from orch.schemas.github.types import Issue
 from orch.schemas.pipeline.types import RunOutcome
-from orch.services import github, store
+from orch.services import forge, store
 
 log = get_logger(component="pipeline")
 
@@ -49,14 +49,14 @@ def _park_invalid_title(
         f"Run: `{run_id}`\n"
     )
     try:
-        github.comment_issue(
-            config.repo.full_name,
+        forge.comment_issue(
+            config,
             issue.number,
             token,
-            github.mark_bot_body(message),
+            forge.mark_bot_body(message),
         )
-        github.edit_labels(
-            config.repo.full_name,
+        forge.edit_labels(
+            config,
             issue.number,
             token,
             add=(config.labels.needs_human,),
@@ -88,14 +88,19 @@ def _park_invalid_title(
 
 
 def _best_effort_comment(
-    repo: str,
+    config: Config,
     issue_number: int,
     token: str,
     body: str,
 ) -> None:
     """Post a bot comment and log instead of raising on failure."""
     try:
-        github.comment_issue(repo, issue_number, token, github.mark_bot_body(body))
+        forge.comment_issue(
+            config,
+            issue_number,
+            token,
+            forge.mark_bot_body(body),
+        )
     except Exception as ex:
         log.bind(
             issue=issue_number,
@@ -105,7 +110,7 @@ def _best_effort_comment(
 
 
 def _best_effort_labels(
-    repo: str,
+    config: Config,
     issue_number: int,
     token: str,
     *,
@@ -114,8 +119,8 @@ def _best_effort_labels(
 ) -> None:
     """Update issue labels and log instead of raising on failure."""
     try:
-        github.edit_labels(
-            repo,
+        forge.edit_labels(
+            config,
             issue_number,
             token,
             add=add,
@@ -182,14 +187,14 @@ def _notify_needs_human(
 ) -> None:
     """Best-effort comment and label update for a parked issue."""
     try:
-        github.comment_issue(
-            config.repo.full_name,
+        forge.comment_issue(
+            config,
             issue.number,
             token,
-            github.mark_bot_body(message),
+            forge.mark_bot_body(message),
         )
-        github.edit_labels(
-            config.repo.full_name,
+        forge.edit_labels(
+            config,
             issue.number,
             token,
             add=(config.labels.needs_human,),
@@ -200,7 +205,7 @@ def _notify_needs_human(
             issue=issue.number,
             error=notify_error,
             error_type=type(notify_error).__name__,
-        ).error("Could not mark issue as needs-human on GitHub")
+        ).error("Could not mark issue as needs-human on the forge")
 
 
 def _cancel_run(

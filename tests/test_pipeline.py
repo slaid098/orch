@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from orch.exceptions.github import GitHubError
+from orch.exceptions.forge import ForgeError
 from orch.exceptions.worker import RunCancelled, WatchdogStop
 from orch.schemas.config.types import (
     Config,
@@ -108,20 +108,20 @@ def test_retry_reuses_source_and_workspace_and_succeeds(
         lambda source: cleaned_sources.append(source),
     )
     monkeypatch.setattr(publish, "_publish_branch", lambda *_args: None)
-    monkeypatch.setattr(pipeline.github, "find_open_pr_for_issue", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(pipeline.github, "find_open_pr", lambda *_args: None)
+    monkeypatch.setattr(pipeline.forge, "find_open_pr_for_issue", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(pipeline.forge, "find_open_pr", lambda *_args: None)
     monkeypatch.setattr(
-        pipeline.github,
+        pipeline.forge,
         "delete_branch",
         lambda _repo, branch, _token: deleted.append(branch),
     )
     monkeypatch.setattr(
-        pipeline.github,
+        pipeline.forge,
         "comment_issue",
         lambda _repo, _number, _token, body: comments.append(body),
     )
     monkeypatch.setattr(
-        pipeline.github,
+        pipeline.forge,
         "edit_labels",
         lambda *_args, **_kwargs: None,
     )
@@ -138,7 +138,7 @@ def test_retry_reuses_source_and_workspace_and_succeeds(
         prs.append({"head": head, "base": base, "title": title, "body": body})
         return "https://example.test/pull/10"
 
-    monkeypatch.setattr(pipeline.github, "create_pr", create_pr)
+    monkeypatch.setattr(pipeline.forge, "create_pr", create_pr)
 
     def run_worker(
         _config: Config,
@@ -214,12 +214,12 @@ def test_invalid_issue_title_is_parked_without_worker(
     labels: list[tuple[tuple[str, ...], tuple[str, ...]]] = []
 
     monkeypatch.setattr(
-        pipeline.github,
+        pipeline.forge,
         "comment_issue",
         lambda _repo, _number, _token, body: comments.append(body),
     )
     monkeypatch.setattr(
-        pipeline.github,
+        pipeline.forge,
         "edit_labels",
         lambda _repo, _number, _token, *, add, remove: labels.append((add, remove)),
     )
@@ -264,12 +264,12 @@ def test_exhausted_attempts_mark_needs_human(
 
     monkeypatch.setattr(pipeline.gitops, "clone_source", clone_source)
     monkeypatch.setattr(pipeline.gitops, "cleanup_source", lambda _source: None)
-    monkeypatch.setattr(pipeline.github, "find_open_pr_for_issue", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(pipeline.github, "find_open_pr", lambda *_args: None)
-    monkeypatch.setattr(pipeline.github, "delete_branch", lambda *_args: None)
-    monkeypatch.setattr(pipeline.github, "comment_issue", lambda *_args: None)
+    monkeypatch.setattr(pipeline.forge, "find_open_pr_for_issue", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(pipeline.forge, "find_open_pr", lambda *_args: None)
+    monkeypatch.setattr(pipeline.forge, "delete_branch", lambda *_args: None)
+    monkeypatch.setattr(pipeline.forge, "comment_issue", lambda *_args: None)
     monkeypatch.setattr(
-        pipeline.github,
+        pipeline.forge,
         "edit_labels",
         lambda _repo, _number, _token, *, add, remove: labels.append((add, remove)),
     )
@@ -319,10 +319,10 @@ def _prepare_cancellation_pipeline(
 
     monkeypatch.setattr(pipeline.gitops, "clone_source", clone_source)
     monkeypatch.setattr(pipeline.gitops, "cleanup_source", lambda _source: None)
-    monkeypatch.setattr(pipeline.github, "find_open_pr_for_issue", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(pipeline.github, "find_open_pr", lambda *_args: None)
-    monkeypatch.setattr(pipeline.github, "edit_labels", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(pipeline.github, "comment_issue", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(pipeline.forge, "find_open_pr_for_issue", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(pipeline.forge, "find_open_pr", lambda *_args: None)
+    monkeypatch.setattr(pipeline.forge, "edit_labels", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(pipeline.forge, "comment_issue", lambda *_args, **_kwargs: None)
 
 
 def test_closed_issue_is_cancelled_before_worker(
@@ -332,7 +332,7 @@ def test_closed_issue_is_cancelled_before_worker(
     config = _config(tmp_path)
     store.init_db(config.data_dir / "orch.db")
     _prepare_cancellation_pipeline(monkeypatch, tmp_path)
-    monkeypatch.setattr(pipeline.github, "issue_is_open", lambda *_args: False)
+    monkeypatch.setattr(pipeline.forge, "issue_is_open", lambda *_args: False)
     monkeypatch.setattr(
         pipeline,
         "run_worker",
@@ -359,7 +359,7 @@ def test_worker_cancellation_does_not_retry(
     store.init_db(config.data_dir / "orch.db")
     calls: list[int] = []
     _prepare_cancellation_pipeline(monkeypatch, tmp_path)
-    monkeypatch.setattr(pipeline.github, "issue_is_open", lambda *_args: True)
+    monkeypatch.setattr(pipeline.forge, "issue_is_open", lambda *_args: True)
 
     def run_worker(*_args: object, **kwargs: object) -> WorkerResult:
         calls.append(int(kwargs.get("attempt", 0)))
@@ -390,19 +390,19 @@ def test_watchdog_stop_parks_without_retry(
     labels: list[tuple[tuple[str, ...], tuple[str, ...]]] = []
     deleted: list[str] = []
     _prepare_cancellation_pipeline(monkeypatch, tmp_path)
-    monkeypatch.setattr(pipeline.github, "issue_is_open", lambda *_args: True)
+    monkeypatch.setattr(pipeline.forge, "issue_is_open", lambda *_args: True)
     monkeypatch.setattr(
-        pipeline.github,
+        pipeline.forge,
         "comment_issue",
         lambda _repo, _number, _token, body: comments.append(body),
     )
     monkeypatch.setattr(
-        pipeline.github,
+        pipeline.forge,
         "edit_labels",
         lambda _repo, _number, _token, *, add, remove: labels.append((add, remove)),
     )
     monkeypatch.setattr(
-        pipeline.github,
+        pipeline.forge,
         "delete_branch",
         lambda _repo, branch, _token: deleted.append(branch),
     )
@@ -442,7 +442,7 @@ def test_closed_issue_cancels_before_pull_request(
     prs: list[str] = []
     _prepare_cancellation_pipeline(monkeypatch, tmp_path)
     monkeypatch.setattr(
-        pipeline.github,
+        pipeline.forge,
         "issue_is_open",
         lambda *_args: next(checks, False),
     )
@@ -452,7 +452,7 @@ def test_closed_issue_cancels_before_pull_request(
         lambda _config, _worker, _token: published.append("published"),
     )
     monkeypatch.setattr(
-        pipeline.github,
+        pipeline.forge,
         "create_pr",
         lambda *_args, **_kwargs: prs.append("created") or "url",
     )
@@ -496,13 +496,13 @@ def test_issue_state_error_does_not_cancel_the_run(
     prs: list[str] = []
     _prepare_cancellation_pipeline(monkeypatch, tmp_path)
     monkeypatch.setattr(
-        pipeline.github,
+        pipeline.forge,
         "issue_is_open",
-        lambda *_args: (_ for _ in ()).throw(GitHubError("offline")),
+        lambda *_args: (_ for _ in ()).throw(ForgeError("offline")),
     )
     monkeypatch.setattr(publish, "_publish_branch", lambda *_args: None)
     monkeypatch.setattr(
-        pipeline.github,
+        pipeline.forge,
         "create_pr",
         lambda *_args, **_kwargs: prs.append("created") or "https://example.test/pr/9",
     )

@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 from orch.config.logger import get_logger
-from orch.exceptions.github import GitHubError
+from orch.exceptions.forge import ForgeError
 from orch.exceptions.pipeline import PublicationError
 from orch.schemas.config.types import Config
 from orch.schemas.github.types import Issue, PullRequestRef
 from orch.schemas.worker.types import WorkerResult
+from orch.services import forge
 from orch.services import git as gitops
-from orch.services import github
 from orch.services.pipeline.lifecycle import (
     _best_effort_comment,
     _best_effort_labels,
@@ -20,15 +20,15 @@ log = get_logger(component="pipeline")
 
 
 def _find_open_pr(
-    repo: str,
+    config: Config,
     branch: str,
     token: str,
     *,
     strict: bool = False,
 ) -> str | None:
     try:
-        return github.find_open_pr(repo, branch, token)
-    except GitHubError as ex:
+        return forge.find_open_pr(config, branch, token)
+    except ForgeError as ex:
         log.bind(branch=branch, error=str(ex)).warning(
             "Could not check for an existing pull request"
         )
@@ -38,7 +38,7 @@ def _find_open_pr(
 
 
 def _find_open_pr_for_issue(
-    repo: str,
+    config: Config,
     issue_number: int,
     token: str,
     *,
@@ -46,13 +46,13 @@ def _find_open_pr_for_issue(
     strict: bool = False,
 ) -> PullRequestRef | None:
     try:
-        return github.find_open_pr_for_issue(
-            repo,
+        return forge.find_open_pr_for_issue(
+            config,
             issue_number,
             token,
             preferred_head=preferred_head,
         )
-    except GitHubError as ex:
+    except ForgeError as ex:
         log.bind(issue=issue_number, error=str(ex)).warning(
             "Could not check for an existing pull request for the issue"
         )
@@ -63,27 +63,27 @@ def _find_open_pr_for_issue(
 
 def _delete_stale_branch(config: Config, branch: str, token: str) -> None:
     try:
-        existing = _find_open_pr(config.repo.full_name, branch, token, strict=True)
-    except GitHubError:
+        existing = _find_open_pr(config, branch, token, strict=True)
+    except ForgeError:
         log.bind(branch=branch).warning(
             "Skipping stale branch deletion because the open-PR check failed"
         )
         return
     if existing:
         return
-    github.delete_branch(config.repo.full_name, branch, token)
+    forge.delete_branch(config, branch, token)
 
 
 def _revision_problem(
-    repo: str,
+    config: Config,
     pr_url: str,
     token: str,
     expected_head: str,
 ) -> str | None:
     """Return why a revision PR cannot be safely updated, if anything."""
     try:
-        status = github.get_pr_status(repo, pr_url, token)
-    except GitHubError as ex:
+        status = forge.get_pr_status(config, pr_url, token)
+    except ForgeError as ex:
         return f"Could not verify pull request {pr_url}: {ex}"
     if status.state != "OPEN":
         return f"Pull request {pr_url} is no longer open; refusing to publish"
@@ -103,7 +103,7 @@ def _publish_branch(
     expected: str | None = None,
 ) -> str:
     bare = gitops.import_bundle(worker.bundle_path, worker.branch, worker.run_dir)
-    remote = gitops.authenticated_remote(config.repo.owner, config.repo.name, token)
+    remote = gitops.authenticated_remote(config, token)
     if expected is None:
         gitops.push_branch(bare, worker.branch, remote, token)
     else:
@@ -123,7 +123,7 @@ def _success_comment(
     return (
         f"orch {action} PR: {pr_url}\n\n"
         f"Попытка: `{attempt}`. Локальные тесты прошли. "
-        f"Проверяю GitHub checks и ревьюера. Run: `{run_id}`\n\n"
+        f"Проверяю CI и ревьюера. Run: `{run_id}`\n\n"
         f"{worker.handoff.what[:3000]}\n"
     )
 
@@ -140,23 +140,22 @@ def _publish_success(
     revision_pr: str | None = None,
     revision_head: str | None = None,
 ) -> tuple[str, str]:
-    repo = config.repo.full_name
     if revision_pr is not None:
         problem = _revision_problem(
-            repo,
+            config,
             revision_pr,
             token,
             revision_head or "",
         )
         if problem is not None:
-            raise GitHubError(problem)
+            raise ForgeError(problem)
     if revision_head is None:
         head_sha = _publish_branch(config, worker, token) or ""
     else:
         head_sha = _publish_branch(config, worker, token, expected=revision_head) or ""
     try:
-        pr_url = _find_open_pr(repo, worker.branch, token, strict=True)
-    except GitHubError as ex:
+        pr_url = _find_open_pr(config, worker.branch, token, strict=True)
+    except ForgeError as ex:
         if revision_pr is None:
             raise
         raise PublicationError(str(ex), head_sha) from ex
@@ -174,8 +173,8 @@ def _publish_success(
             )
     updated = pr_url is not None
     if pr_url is None:
-        pr_url = github.create_pr(
-            repo,
+        pr_url = forge.create_pr(
+            config,
             token,
             head=worker.branch,
             base=config.repo.base_branch,
@@ -183,13 +182,13 @@ def _publish_success(
             body=format_pr_body(worker.handoff, issue.number),
         )
     _best_effort_comment(
-        repo,
+        config,
         issue.number,
         token,
         _success_comment(worker, pr_url, run_id, attempt, updated=updated),
     )
     _best_effort_labels(
-        repo,
+        config,
         issue.number,
         token,
         add=(config.labels.pr_open,),

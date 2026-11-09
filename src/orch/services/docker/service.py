@@ -9,6 +9,7 @@ from pathlib import Path
 
 from orch.config.logger import get_logger
 from orch.exceptions.docker import DockerError
+from orch.schemas.skills.types import Skill
 
 log = get_logger(component="docker")
 
@@ -236,6 +237,16 @@ def _agent_run_args(
     return args
 
 
+def _skills_mounts(skills: tuple[Skill, ...]) -> list[str]:
+    """Mount selected skills read-only into the agent home directory."""
+    mounts: list[str] = []
+    for skill in skills:
+        mounts.extend(
+            ["-v", f"{skill.path}:/home/agent/.claude/skills/{skill.name}:ro"]
+        )
+    return mounts
+
+
 def _worker_run_args(
     *,
     image: str,
@@ -245,6 +256,7 @@ def _worker_run_args(
     run_dir: Path,
     model: str,
     context_tokens: int | None,
+    skills: tuple[Skill, ...] = (),
 ) -> list[str]:
     return _agent_run_args(
         image=image,
@@ -258,6 +270,7 @@ def _worker_run_args(
             f"{workspace_path}:/work",
             "-v",
             f"{run_dir}:/out",
+            *_skills_mounts(skills),
         ],
         env=_agent_env(model, context_tokens),
     )
@@ -293,6 +306,7 @@ def start_reviewer(
     model: str,
     context_tokens: int | None = None,
     codegraph_enabled: bool = True,
+    skills: tuple[Skill, ...] = (),
 ) -> str:
     """Start a read-only reviewer container.
 
@@ -304,6 +318,7 @@ def start_reviewer(
         model: Ollama model name passed to Claude Code.
         context_tokens: Context window in tokens, or ``None`` for auto.
         codegraph_enabled: Whether to expose the repository CodeGraph index.
+        skills: Skills mounted read-only under ``~/.claude/skills``.
 
     Returns:
         The container ID.
@@ -330,6 +345,7 @@ def start_reviewer(
             *_codegraph_mount(repo_path, enabled=codegraph_enabled),
             "-v",
             f"{run_dir}:/out",
+            *_skills_mounts(skills),
         ],
         env=_agent_env(model, context_tokens),
     )
@@ -350,6 +366,7 @@ def start_worker(
     run_dir: Path,
     model: str,
     context_tokens: int | None = None,
+    skills: tuple[Skill, ...] = (),
 ) -> str:
     """Start a detached worker container.
 
@@ -361,6 +378,7 @@ def start_worker(
         run_dir: Host run directory mounted at ``/out``.
         model: Ollama model name passed to Claude Code.
         context_tokens: Context window in tokens, or ``None`` for auto.
+        skills: Skills mounted read-only under ``~/.claude/skills``.
 
     Returns:
         The container ID.
@@ -377,6 +395,7 @@ def start_worker(
         run_dir=run_dir,
         model=model,
         context_tokens=context_tokens,
+        skills=skills,
     )
     result = _run(args, timeout=120)
     container_id = (result.stdout or "").strip()

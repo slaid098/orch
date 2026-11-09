@@ -417,7 +417,7 @@ def test_notify_recovered_has_emoji_and_component(
     assert notify_recovered(
         _enabled_config(tmp_path),
         component="daemon-poll",
-        detail="GitHub polling works again.",
+        detail="Forge polling works again.",
     )
 
     text = _body(calls[0][0])["text"]

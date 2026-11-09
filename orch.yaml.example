@@ -4,6 +4,9 @@ repo:
   path: D:/Python projects/orch
   base_branch: main
   remote: origin
+  # github (default) or forgejo. Forgejo also requires repo.url.
+  forge: github
+  # url: https://git.slaid098.dev
 
 labels:
   queued: agent:queued
@@ -19,6 +22,10 @@ worker:
   max_attempts: 3
   autocompact: 200k
   allowed_tools: "Read,Write,Edit,Bash,Glob,Grep"
+  # Skill directories under skills_dir (default: ./skills) mounted read-only
+  # into the worker at ~/.claude/skills. Missing names fail preflight.
+  skills:
+    - code-standards
   setup_commands:
     - uv sync --all-extras
   test_commands:
@@ -43,6 +50,8 @@ reviewer:
   max_rounds: 3
   autocompact: 200k
   allowed_tools: "Read,Grep,Glob"
+  skills:
+    - code-standards
   # Approved PRs stay open for manual merge by default. Set true to squash-merge
   # into main after green checks and an empty findings array from both reviewers.
   auto_merge: false

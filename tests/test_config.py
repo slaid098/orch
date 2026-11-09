@@ -930,3 +930,178 @@ worker:
 
     with pytest.raises(ConfigError):
         load_config(config_path)
+
+
+def test_load_config_defaults_to_github(tmp_path: Path) -> None:
+    repo_path = tmp_path / "repo"
+    (repo_path / ".git").mkdir(parents=True)
+    config_path = _write_config(
+        tmp_path,
+        f"""
+repo:
+  owner: slaid098
+  name: orch
+  path: {repo_path.as_posix()}
+worker:
+  test_commands:
+    - pytest
+""",
+    )
+
+    config = load_config(config_path)
+
+    assert config.repo.forge == "github"
+    assert config.repo.url == ""
+
+
+def test_load_config_reads_a_forgejo_repository(tmp_path: Path) -> None:
+    repo_path = tmp_path / "repo"
+    (repo_path / ".git").mkdir(parents=True)
+    config_path = _write_config(
+        tmp_path,
+        f"""
+repo:
+  owner: slaid098
+  name: orch
+  path: {repo_path.as_posix()}
+  forge: forgejo
+  url: https://git.example.test/
+worker:
+  test_commands:
+    - pytest
+""",
+    )
+
+    config = load_config(config_path)
+
+    assert config.repo.forge == "forgejo"
+    assert config.repo.url == "https://git.example.test"
+
+
+def test_load_config_requires_a_forgejo_url(tmp_path: Path) -> None:
+    repo_path = tmp_path / "repo"
+    (repo_path / ".git").mkdir(parents=True)
+    config_path = _write_config(
+        tmp_path,
+        f"""
+repo:
+  owner: slaid098
+  name: orch
+  path: {repo_path.as_posix()}
+  forge: forgejo
+worker:
+  test_commands:
+    - pytest
+""",
+    )
+
+    with pytest.raises(ConfigError, match="repo.url"):
+        load_config(config_path)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "ftp://git.example.test",
+        "https://user:pass@git.example.test",
+        "https://git.example.test?x=1",
+        "https://git.example.test#fragment",
+        "not-a-url",
+    ],
+)
+def test_load_config_rejects_an_invalid_forgejo_url(
+    tmp_path: Path,
+    url: str,
+) -> None:
+    repo_path = tmp_path / "repo"
+    (repo_path / ".git").mkdir(parents=True)
+    config_path = _write_config(
+        tmp_path,
+        f"""
+repo:
+  owner: slaid098
+  name: orch
+  path: {repo_path.as_posix()}
+  forge: forgejo
+  url: {url}
+worker:
+  test_commands:
+    - pytest
+""",
+    )
+
+    with pytest.raises(ConfigError, match="repo.url"):
+        load_config(config_path)
+
+
+def test_load_config_rejects_an_unknown_forge(tmp_path: Path) -> None:
+    repo_path = tmp_path / "repo"
+    (repo_path / ".git").mkdir(parents=True)
+    config_path = _write_config(
+        tmp_path,
+        f"""
+repo:
+  owner: slaid098
+  name: orch
+  path: {repo_path.as_posix()}
+  forge: gitlab
+worker:
+  test_commands:
+    - pytest
+""",
+    )
+
+    with pytest.raises(ConfigError, match="repo.forge"):
+        load_config(config_path)
+
+
+def test_load_config_resolves_the_forgejo_token(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_path = tmp_path / "repo"
+    (repo_path / ".git").mkdir(parents=True)
+    monkeypatch.setenv("FORGEJO_TOKEN", " explicit ")
+    monkeypatch.delenv("ORCH_FORGEJO_TOKEN", raising=False)
+    config_path = _write_config(
+        tmp_path,
+        f"""
+repo:
+  owner: slaid098
+  name: orch
+  path: {repo_path.as_posix()}
+worker:
+  test_commands:
+    - pytest
+""",
+    )
+
+    config = load_config(config_path)
+
+    assert config.forgejo_token == "explicit"
+
+
+def test_load_config_prefers_the_orch_forgejo_token(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_path = tmp_path / "repo"
+    (repo_path / ".git").mkdir(parents=True)
+    monkeypatch.setenv("FORGEJO_TOKEN", "fallback")
+    monkeypatch.setenv("ORCH_FORGEJO_TOKEN", " explicit ")
+    config_path = _write_config(
+        tmp_path,
+        f"""
+repo:
+  owner: slaid098
+  name: orch
+  path: {repo_path.as_posix()}
+worker:
+  test_commands:
+    - pytest
+""",
+    )
+
+    config = load_config(config_path)
+
+    assert config.forgejo_token == "explicit"

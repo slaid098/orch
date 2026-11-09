@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from orch.config.logger import get_logger
-from orch.exceptions.github import GitHubError
+from orch.exceptions.forge import ForgeError
 from orch.exceptions.pipeline import PublicationError, ReviewRejected
 from orch.exceptions.reviewer import ReviewerError
 from orch.exceptions.standards import StandardsError
@@ -17,8 +17,8 @@ from orch.schemas.github.types import Issue
 from orch.schemas.pipeline.types import AttemptCycle, AttemptSuccess, RunOutcome
 from orch.schemas.reviewer.types import ReviewFinding
 from orch.schemas.worker.types import WorkerResult
+from orch.services import forge, notify, store
 from orch.services import git as gitops
-from orch.services import github, notify, store
 from orch.services.feedback.service import CommentFeed
 from orch.services.pipeline.failures import (
     _comment_attempt_failure as _comment_attempt_failure,
@@ -81,7 +81,7 @@ def run_issue(
     Args:
         config: Orchestrator configuration.
         issue: Issue to implement.
-        token: GitHub token.
+        token: Forge token.
         claim: Whether this call should move the issue from queued to running.
         attempt_timeout_seconds: Optional test/override budget for one attempt.
 
@@ -185,16 +185,15 @@ def _start_run(
     timeout_seconds: int,
     claim: bool,
 ) -> RunOutcome:
-    repo = config.repo.full_name
     try:
         existing = _find_open_pr_for_issue(
-            repo,
+            config,
             issue.number,
             token,
             preferred_head=branch,
             strict=True,
         )
-    except GitHubError as ex:
+    except ForgeError as ex:
         return _park_before_attempts(
             config,
             issue,
@@ -226,8 +225,8 @@ def _start_run(
     pr_head: str | None = None
     if existing_pr:
         try:
-            pr_head = github.get_pr_status(repo, existing_pr, token).head_sha
-        except GitHubError as ex:
+            pr_head = forge.get_pr_status(config, existing_pr, token).head_sha
+        except ForgeError as ex:
             return _park_before_attempts(
                 config,
                 issue,
@@ -253,8 +252,8 @@ def _start_run(
                 pr_url=existing_pr,
             )
     if claim:
-        github.edit_labels(
-            repo,
+        forge.edit_labels(
+            config,
             issue.number,
             token,
             add=(config.labels.running,),
@@ -361,13 +360,13 @@ def _finish_existing_pr(
 ) -> RunOutcome:
     log.info("Issue #{} already has an open PR: {}", issue.number, pr_url)
     _best_effort_comment(
-        config.repo.full_name,
+        config,
         issue.number,
         token,
         f"PR уже открыт: {pr_url}\n\nRun: `{run_id}`",
     )
     _best_effort_labels(
-        config.repo.full_name,
+        config,
         issue.number,
         token,
         add=(config.labels.pr_open,),
@@ -433,13 +432,7 @@ def _run_attempts(
         if config.feedback.enabled and config.feedback.live_comments:
             feed.start()
     try:
-        mirror = gitops.refresh_mirror(
-            config.data_dir,
-            config.repo.owner,
-            config.repo.name,
-            config.repo.base_branch,
-            token,
-        )
+        mirror = gitops.refresh_mirror(config, token)
         source = gitops.clone_source(
             mirror,
             config.repo.base_branch,
@@ -564,7 +557,7 @@ def _run_attempt_cycle(
 ) -> AttemptCycle:
     if revision_pr is not None and revision_head is not None:
         problem = _revision_problem(
-            config.repo.full_name,
+            config,
             revision_pr,
             token,
             revision_head,
@@ -910,7 +903,7 @@ def _approved_review_cycle(
         )
     else:
         _best_effort_comment(
-            config.repo.full_name,
+            config,
             issue.number,
             token,
             f"Ревью пройдено, PR готов к ручному merge: {attempt_result.pr_url}\n\n"

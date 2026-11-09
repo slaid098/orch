@@ -407,11 +407,29 @@ Copy `orch.yaml.example` to `orch.yaml` and adjust paths, labels, commands, and
 the model. `orch.yaml` and `app_data/` are ignored by git.
 
 The base branch is fetched into a local bare mirror under `data_dir`; the worker
-never receives a GitHub token and never fetches from GitHub directly.
+never receives a forge token and never fetches directly.
 `reviewer.image` and `reviewer.model` fall back to the worker image and model
 when omitted. Reviewers are read-only and usually finish in about 7–8 minutes;
 the default 30-minute timeout is a safety cap, while the worker keeps its longer
 90-minute budget for implementation and tests.
+
+### Forge selection
+
+`repo.forge` selects the API and the pull-request workflow: `github` (default)
+or `forgejo`. For Forgejo, `repo.url` is required (for example
+`https://git.example.com`), and the token is read from `ORCH_FORGEJO_TOKEN`
+first, then `FORGEJO_TOKEN`. The repository's git remote must point to the same
+host. Both forges use the same branch, issue, review, and gate flow. Forgejo
+reads `.github/workflows`, so no `.forgejo/workflows` directory is needed.
+
+### Per-role skills
+
+`worker.skills` and `reviewer.skills` list directory names under `skills_dir`
+(default `skills/` next to `orch.yaml`). Each selected directory must contain
+`SKILL.md`; `--check` fails only when a named skill is missing, and an empty
+list is valid. Selected directories are mounted read-only into the
+corresponding container under `~/.claude/skills/<name>`. `prompt.md` stays
+orchestration-only; role-specific code rules belong in skills.
 
 Feature flags:
 

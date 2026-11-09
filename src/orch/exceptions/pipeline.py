@@ -2,18 +2,18 @@
 
 from __future__ import annotations
 
-from orch.exceptions.github import GitHubError
+from orch.exceptions.forge import ForgeError
 
 
 class ChecksFailed(RuntimeError):
-    """A pull request has failing or unavailable GitHub checks."""
+    """A pull request has failing or unavailable checks."""
 
 
 class ReviewRejected(RuntimeError):
     """The reviewer returned at least one blocking finding."""
 
 
-class PublicationError(GitHubError):
+class PublicationError(ForgeError):
     """A publication step failed after the branch was already pushed."""
 
     def __init__(self, message: str, head_sha: str) -> None:

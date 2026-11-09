@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from orch.exceptions.github import GitHubError
+from orch.exceptions.forge import ForgeError
 from orch.schemas.config.types import Config, LabelsConfig, RepoConfig, WorkerConfig
 from orch.schemas.github.types import Issue
 from orch.schemas.pipeline.types import RunOutcome
@@ -80,16 +80,18 @@ def test_initialize_resolves_token_and_labels(
 ) -> None:
     config = _config(tmp_path)
     calls: list[object] = []
-    monkeypatch.setattr(daemon.github, "resolve_token", lambda owner, token: "token")
+    monkeypatch.setattr(daemon.forge, "resolve_token", lambda *_args: "token")
     monkeypatch.setattr(
-        daemon,
+        daemon.forge,
         "ensure_user",
-        lambda token, owner: calls.append(("user", token, owner)),
+        lambda config, token: calls.append(("user", token, config.repo.owner)),
     )
     monkeypatch.setattr(
-        daemon,
+        daemon.forge,
         "ensure_labels",
-        lambda repo, token, labels: calls.append(("labels", repo, labels)),
+        lambda config, token, labels: calls.append(
+            ("labels", config.repo.full_name, labels)
+        ),
     )
     monkeypatch.setattr(
         daemon.store,
@@ -118,7 +120,7 @@ def test_run_once_returns_zero_for_open_pr(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config = _config(tmp_path)
-    monkeypatch.setattr(daemon.github, "get_issue", lambda *_args: _issue())
+    monkeypatch.setattr(daemon.forge, "get_issue", lambda *_args: _issue())
     monkeypatch.setattr(daemon, "run_issue", lambda *_args: _outcome())
 
     assert daemon.run_once(config, "token", 7) == 0
@@ -129,7 +131,7 @@ def test_run_once_returns_zero_for_merged_pr(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config = _config(tmp_path)
-    monkeypatch.setattr(daemon.github, "get_issue", lambda *_args: _issue())
+    monkeypatch.setattr(daemon.forge, "get_issue", lambda *_args: _issue())
     monkeypatch.setattr(daemon, "run_issue", lambda *_args: _outcome("merged"))
 
     assert daemon.run_once(config, "token", 7) == 0
@@ -140,7 +142,7 @@ def test_run_once_returns_one_for_needs_human(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config = _config(tmp_path)
-    monkeypatch.setattr(daemon.github, "get_issue", lambda *_args: _issue())
+    monkeypatch.setattr(daemon.forge, "get_issue", lambda *_args: _issue())
     monkeypatch.setattr(daemon, "run_issue", lambda *_args: _outcome("needs_human"))
 
     assert daemon.run_once(config, "token", 7) == 1
@@ -153,9 +155,9 @@ def test_run_once_returns_one_when_issue_is_missing(
     config = _config(tmp_path)
 
     def fail(*_args: object) -> Issue:
-        raise GitHubError("missing")
+        raise ForgeError("missing")
 
-    monkeypatch.setattr(daemon.github, "get_issue", fail)
+    monkeypatch.setattr(daemon.forge, "get_issue", fail)
 
     assert daemon.run_once(config, "token", 7) == 1
 
@@ -205,7 +207,7 @@ def test_run_daemon_claims_one_issue_and_stops_on_interrupt(
     config = _config(tmp_path)
     executor_holder: list[FakeExecutor] = []
     monkeypatch.setattr(daemon, "_reconcile_startup", lambda *_args: None)
-    monkeypatch.setattr(daemon.github, "list_ready_issues", lambda *_args: [_issue()])
+    monkeypatch.setattr(daemon.forge, "list_ready_issues", lambda *_args: [_issue()])
     monkeypatch.setattr(daemon.store, "has_active_run", lambda *_args: False)
     monkeypatch.setattr(daemon, "_claim_issue", lambda *_args: True)
 
@@ -234,9 +236,9 @@ def test_run_daemon_survives_poll_errors(
     monkeypatch.setattr(daemon, "_reconcile_startup", lambda *_args: None)
 
     def fail(*_args: object) -> list[Issue]:
-        raise GitHubError("offline")
+        raise ForgeError("offline")
 
-    monkeypatch.setattr(daemon.github, "list_ready_issues", fail)
+    monkeypatch.setattr(daemon.forge, "list_ready_issues", fail)
     monkeypatch.setattr(daemon, "ThreadPoolExecutor", FakeExecutor)
 
     def interrupt(_seconds: int) -> None:
@@ -254,7 +256,7 @@ def test_run_daemon_skips_active_and_unclaimed_issues(
     config = _config(tmp_path)
     monkeypatch.setattr(daemon, "_reconcile_startup", lambda *_args: None)
     monkeypatch.setattr(
-        daemon.github,
+        daemon.forge,
         "list_ready_issues",
         lambda *_args: [_issue(7), _issue(8)],
     )
@@ -330,7 +332,7 @@ def test_claim_issue_returns_true_on_success(
     config = _config(tmp_path)
     calls: list[tuple[tuple[str, ...], tuple[str, ...]]] = []
     monkeypatch.setattr(
-        daemon.github,
+        daemon.forge,
         "edit_labels",
         lambda _repo, _number, _token, *, add, remove: calls.append((add, remove)),
     )
@@ -344,16 +346,16 @@ def test_claim_issue_returns_true_on_success(
     ]
 
 
-def test_claim_issue_returns_false_on_github_error(
+def test_claim_issue_returns_false_on_forge_error(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config = _config(tmp_path)
 
     def fail(*_args: object, **_kwargs: object) -> None:
-        raise GitHubError("offline")
+        raise ForgeError("offline")
 
-    monkeypatch.setattr(daemon.github, "edit_labels", fail)
+    monkeypatch.setattr(daemon.forge, "edit_labels", fail)
 
     assert not daemon._claim_issue(config, _issue(), "token")
 
@@ -367,9 +369,9 @@ def test_claim_failure_notification_is_rate_limited(
     daemon._claim_notified_at.clear()
 
     def fail(*_args: object, **_kwargs: object) -> None:
-        raise GitHubError("offline")
+        raise ForgeError("offline")
 
-    monkeypatch.setattr(daemon.github, "edit_labels", fail)
+    monkeypatch.setattr(daemon.forge, "edit_labels", fail)
     monkeypatch.setattr(
         daemon.notify,
         "notify_error",
@@ -394,17 +396,17 @@ def test_reconcile_startup_requeues_running_issues(
         lambda *_args: calls.append("interrupt") or 1,
     )
     monkeypatch.setattr(
-        daemon.github,
+        daemon.forge,
         "list_ready_issues",
         lambda *_args: [_issue()],
     )
     monkeypatch.setattr(
-        daemon.github,
+        daemon.forge,
         "comment_issue",
         lambda *args: calls.append(("comment", args)),
     )
     monkeypatch.setattr(
-        daemon.github,
+        daemon.forge,
         "edit_labels",
         lambda *args, **kwargs: calls.append(("labels", args, kwargs)),
     )
@@ -426,9 +428,9 @@ def test_reconcile_startup_handles_list_failure(
     monkeypatch.setattr(daemon.store, "interrupt_active_runs", lambda *_args: 0)
 
     def fail(*_args: object) -> list[Issue]:
-        raise GitHubError("offline")
+        raise ForgeError("offline")
 
-    monkeypatch.setattr(daemon.github, "list_ready_issues", fail)
+    monkeypatch.setattr(daemon.forge, "list_ready_issues", fail)
 
     daemon._reconcile_startup(config, "token")
 
@@ -441,15 +443,15 @@ def test_reconcile_startup_continues_after_one_failure(
     monkeypatch.setattr(daemon, "cleanup_managed", lambda: None)
     monkeypatch.setattr(daemon.store, "interrupt_active_runs", lambda *_args: 0)
     monkeypatch.setattr(
-        daemon.github,
+        daemon.forge,
         "list_ready_issues",
         lambda *_args: [_issue(7), _issue(8)],
     )
 
     def fail(*_args: object, **_kwargs: object) -> None:
-        raise GitHubError("offline")
+        raise ForgeError("offline")
 
-    monkeypatch.setattr(daemon.github, "comment_issue", fail)
+    monkeypatch.setattr(daemon.forge, "comment_issue", fail)
 
     daemon._reconcile_startup(config, "token")
 
@@ -461,7 +463,7 @@ def test_run_daemon_sends_accepted_notification(
     config = _config(tmp_path)
     accepted: list[tuple[int, int, int]] = []
     monkeypatch.setattr(daemon, "_reconcile_startup", lambda *_args: None)
-    monkeypatch.setattr(daemon.github, "list_ready_issues", lambda *_args: [_issue(7), _issue(8)])
+    monkeypatch.setattr(daemon.forge, "list_ready_issues", lambda *_args: [_issue(7), _issue(8)])
     monkeypatch.setattr(daemon.store, "has_active_run", lambda *_args: False)
     monkeypatch.setattr(daemon, "_claim_issue", lambda *_args: True)
     monkeypatch.setattr(daemon, "ThreadPoolExecutor", FakeExecutor)
@@ -540,7 +542,7 @@ def test_run_once_sends_lifecycle_notifications(
     config = _config(tmp_path)
     accepted: list[int] = []
     finished: list[str] = []
-    monkeypatch.setattr(daemon.github, "get_issue", lambda *_args: _issue())
+    monkeypatch.setattr(daemon.forge, "get_issue", lambda *_args: _issue())
     monkeypatch.setattr(daemon, "run_issue", lambda *_args: _outcome())
     monkeypatch.setattr(
         daemon.notify,
@@ -572,7 +574,7 @@ def test_run_once_refuses_closed_issue(
         labels=("agent:queued",),
         state="CLOSED",
     )
-    monkeypatch.setattr(daemon.github, "get_issue", lambda *_args: closed)
+    monkeypatch.setattr(daemon.forge, "get_issue", lambda *_args: closed)
     monkeypatch.setattr(
         daemon,
         "run_issue",
@@ -628,7 +630,7 @@ def test_run_once_refuses_human_hold(
 ) -> None:
     config = _config(tmp_path)
     held = replace(_issue(), labels=("agent:queued", "agent:hold"))
-    monkeypatch.setattr(daemon.github, "get_issue", lambda *_args: held)
+    monkeypatch.setattr(daemon.forge, "get_issue", lambda *_args: held)
     monkeypatch.setattr(
         daemon,
         "run_issue",
