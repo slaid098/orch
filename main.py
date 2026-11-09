@@ -9,8 +9,10 @@ from loguru import logger
 
 from orch.config.settings import load_config
 from orch.exceptions.config import ConfigError
+from orch.exceptions.instance import InstanceLockError
 from orch.services import notify
 from orch.services.daemon import initialize, run_daemon, run_once, setup_logging
+from orch.services.instance import instance_lock
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -30,16 +32,26 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     setup_logging(config)
+    mode = "once" if args.once else "daemon"
     try:
-        token = initialize(config)
-    except Exception as ex:
-        logger.bind(error=ex, error_type=type(ex).__name__).error("Could not initialize orch")
-        notify.notify_error(config, stage="startup", error=ex)
-        return 1
+        with instance_lock(config.data_dir, mode=mode):
+            try:
+                token = initialize(config)
+            except Exception as ex:
+                logger.bind(error=ex, error_type=type(ex).__name__).error(
+                    "Could not initialize orch"
+                )
+                notify.notify_error(config, stage="startup", error=ex)
+                return 1
 
-    if args.once:
-        return run_once(config, token, args.issue)
-    return run_daemon(config, token)
+            if args.once:
+                return run_once(config, token, args.issue)
+            return run_daemon(config, token)
+    except InstanceLockError as ex:
+        logger.bind(error=ex, error_type=type(ex).__name__).error(
+            "Could not start orch: another instance is already running"
+        )
+        return 1
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
