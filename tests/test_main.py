@@ -6,6 +6,7 @@ import pytest
 
 import main as orch_main
 from orch.exceptions.config import ConfigError
+from orch.exceptions.instance import InstanceLockError
 from orch.schemas.config.types import Config, LabelsConfig, RepoConfig, WorkerConfig
 
 
@@ -109,3 +110,25 @@ def test_initialization_error_returns_exit_code_one(
     monkeypatch.setattr(orch_main, "initialize", fail)
 
     assert orch_main.main([]) == 1
+
+
+def test_busy_instance_returns_exit_code_one(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    monkeypatch.setattr(orch_main, "load_config", lambda _path: config)
+    monkeypatch.setattr(orch_main, "setup_logging", lambda _config: None)
+    monkeypatch.setattr(
+        orch_main,
+        "initialize",
+        lambda _config: pytest.fail("initialize must not run without the lock"),
+    )
+
+    def busy(*_args: object, **_kwargs: object) -> object:
+        raise InstanceLockError("another instance holds the lock")
+
+    monkeypatch.setattr(orch_main, "instance_lock", busy)
+
+    assert orch_main.main([]) == 1
+
