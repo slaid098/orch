@@ -16,6 +16,7 @@ from orch.constants.standards import (
     COMMIT_TYPES,
     ISSUE_BODY_HEADINGS,
     PR_HEADINGS,
+    PR_ISSUE_MARKER,
     TITLE_MAX_LENGTH,
 )
 from orch.exceptions.standards import StandardsError
@@ -27,7 +28,6 @@ _TITLE_RE = re.compile(
     rf"^({'|'.join(COMMIT_TYPES)})\(([a-z0-9][a-z0-9-]*)\): (.+)$"
 )
 _CYRILLIC_RE = re.compile(r"[\u0400-\u04FF]")
-_SLUG_INVALID_RE = re.compile(r"[^a-z0-9]+")
 
 
 def validate_title(title: str) -> str:
@@ -100,55 +100,20 @@ def validate_issue_body(body: str) -> str:
     return text
 
 
-def _parse_title(title: str) -> tuple[str, str, str]:
-    """Split a validated title into ``type``, ``scope``, and ``description``.
+def branch_name(issue_number: int) -> str:
+    """Build the stable branch name for an issue.
 
     Args:
-        title: Issue title.
-
-    Returns:
-        A tuple of type, scope, and description.
-    """
-    value = validate_title(title)
-    match = _TITLE_RE.fullmatch(value)
-    if match is None:
-        raise StandardsError("Title must match 'type(scope): description'")
-    return match.group(1), match.group(2), match.group(3).strip()
-
-
-def _slugify(value: str, *, limit: int = 40) -> str:
-    """Convert a title description into a branch-safe slug.
-
-    Args:
-        value: Human-readable description.
-        limit: Maximum slug length.
-
-    Returns:
-        A lowercase kebab-case slug.
-    """
-    slug = _SLUG_INVALID_RE.sub("-", value.lower()).strip("-")
-    slug = slug[:limit].rstrip("-")
-    if not slug:
-        raise StandardsError("Description must contain latin letters or digits")
-    return slug
-
-
-def branch_name(title: str, issue_number: int) -> str:
-    """Build the deterministic branch name for an issue.
-
-    Args:
-        title: Issue title.
         issue_number: GitHub issue number.
 
     Returns:
-        A branch in ``type/scope/issue-<N>-<slug>`` form.
+        A branch in ``orch/issue-<N>`` form.
     """
-    commit_type, scope, description = _parse_title(title)
-    return f"{commit_type}/{scope}/issue-{issue_number}-{_slugify(description)}"
+    return f"orch/issue-{issue_number}"
 
 
 def validate_branch(branch: str, issue_number: int) -> str:
-    """Validate a branch name against the issue-based format.
+    """Validate a branch name against the new or legacy issue format.
 
     Args:
         branch: Branch name to validate.
@@ -158,17 +123,21 @@ def validate_branch(branch: str, issue_number: int) -> str:
         The branch name.
 
     Raises:
-        StandardsError: If the branch does not follow the required format.
+        StandardsError: If the branch does not reference the issue.
     """
-    pattern = re.compile(
+    expected = branch_name(issue_number)
+    if branch == expected:
+        return branch
+    legacy = re.compile(
         rf"^({'|'.join(COMMIT_TYPES)})/[a-z0-9][a-z0-9-]*/"
-        rf"issue-{issue_number}-[a-z0-9]+(?:-[a-z0-9]+)*$"
+        rf"issue-{issue_number}(?:-[a-z0-9]+(?:-[a-z0-9]+)*)?$"
     )
-    if not pattern.fullmatch(branch):
-        raise StandardsError(
-            "Branch must match 'type/scope/issue-<N>-<kebab-description>'"
-        )
-    return branch
+    if legacy.fullmatch(branch):
+        return branch
+    raise StandardsError(
+        f"Branch must be {expected!r} or a legacy "
+        "'type/scope/issue-<N>-<kebab-description>' branch"
+    )
 
 
 def load_handoff(run_dir: Path) -> Handoff:
@@ -219,7 +188,8 @@ def format_pr_body(handoff: Handoff, issue_number: int) -> str:
         f"{PR_HEADINGS[1]}\n{why}\n\n"
         f"{PR_HEADINGS[2]}\n{watch_out}\n\n"
         f"{PR_HEADINGS[3]}\n{pending}\n\n"
-        f"Closes #{issue_number}\n"
+        f"Closes #{issue_number}\n\n"
+        f"{PR_ISSUE_MARKER.format(issue_number=issue_number)}\n"
     )
 
 

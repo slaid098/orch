@@ -349,14 +349,17 @@ Use this checklist for the first controlled run against a real issue. Complete
 
 ## Standards
 
-The issue title is the single source of truth:
+The issue title is the single source of truth for the work itself; branch
+identity depends only on the issue number:
 
 - Issue title: `type(scope): English description`, mandatory scope, at most
   72 characters.
-- Branch: `type/scope/issue-N-kebab-description`.
-- Commit title and pull-request title: exactly the issue title.
+- Branch: `orch/issue-N`. Renaming the issue never changes the branch, so
+  revisions continue on the same pull request.
+- Commit title and pull-request title: exactly the issue title at creation time.
 - One commit; no commit body, GPG signature, or `Signed-off-by`.
-- Pull-request body uses four Russian sections and ends with `Closes #N`.
+- Pull-request body uses four Russian sections, ends with `Closes #N`, and
+  carries a hidden `<!-- orch:issue=N -->` marker for stable lookup.
 
 The executable source of workflow rules is
 `src/orch/services/standards/policy.py`. Architecture and code rules live in the

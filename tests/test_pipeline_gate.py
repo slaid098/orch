@@ -78,12 +78,12 @@ def _handoff() -> Handoff:
     )
 
 
-def _worker_result(run_dir: Path) -> WorkerResult:
+def _worker_result(run_dir: Path, branch: str = "orch/issue-9") -> WorkerResult:
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "diff.patch").write_text("diff --git a/a.py b/a.py\n", encoding="utf-8")
     return WorkerResult(
         run_dir=run_dir,
-        branch="fix/pipeline/issue-9-add-reliable-retry-path",
+        branch=branch,
         handoff=_handoff(),
         tests_output="passed",
         bundle_path=run_dir / "result.bundle",
@@ -146,6 +146,11 @@ def _prepare(
         lambda workspace: events["cleaned_workspaces"].append(workspace),
     )
     monkeypatch.setattr(publish, "_publish_branch", lambda *_args: None)
+    monkeypatch.setattr(
+        pipeline.github,
+        "find_open_pr_for_issue",
+        lambda *_args, **_kwargs: None,
+    )
     monkeypatch.setattr(pipeline.github, "find_open_pr", lambda *_args: None)
     monkeypatch.setattr(pipeline.github, "issue_is_open", lambda *_args: True)
     monkeypatch.setattr(pipeline.github, "delete_branch", lambda *_args: None)
@@ -203,7 +208,7 @@ def _prepare(
         events["previous_errors"].append(kwargs["previous_error"])
         if attempt in worker_errors:
             raise RuntimeError(f"worker failed on attempt {attempt}")
-        return _worker_result(run_dir)
+        return _worker_result(run_dir, branch=str(kwargs["branch"]))
 
     monkeypatch.setattr(pipeline, "_wait_for_checks", fake_checks)
     monkeypatch.setattr(gate, "run_review", fake_review)

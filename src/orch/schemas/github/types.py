@@ -52,6 +52,15 @@ class CheckResult:
 
 
 @dataclass(frozen=True)
+class PullRequestRef:
+    """Minimal identity of an open pull request used for revisions."""
+
+    number: int
+    url: str
+    head_ref: str
+
+
+@dataclass(frozen=True)
 class PullRequestStatus:
     """The pull-request fields needed by the pipeline gate."""
 

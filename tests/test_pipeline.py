@@ -108,6 +108,7 @@ def test_retry_reuses_source_and_workspace_and_succeeds(
         lambda source: cleaned_sources.append(source),
     )
     monkeypatch.setattr(publish, "_publish_branch", lambda *_args: None)
+    monkeypatch.setattr(pipeline.github, "find_open_pr_for_issue", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(pipeline.github, "find_open_pr", lambda *_args: None)
     monkeypatch.setattr(
         pipeline.github,
@@ -146,6 +147,7 @@ def test_retry_reuses_source_and_workspace_and_succeeds(
         *,
         source_path: Path,
         workspace_path: Path,
+        branch: str,
         attempt: int,
         previous_error: str | None,
         timeout_seconds: int,
@@ -159,7 +161,7 @@ def test_retry_reuses_source_and_workspace_and_succeeds(
             raise RuntimeError("first attempt broke")
         return WorkerResult(
             run_dir=run_dir,
-            branch="fix/pipeline/issue-9-add-reliable-retry-path",
+            branch=branch,
             handoff=_handoff(),
             tests_output="passed",
             bundle_path=run_dir / "result.bundle",
@@ -185,7 +187,7 @@ def test_retry_reuses_source_and_workspace_and_succeeds(
     assert attempts == [1, 2]
     assert previous_errors == [None, "first attempt broke"]
     assert cleaned_sources == [sources[0]]
-    assert deleted == ["fix/pipeline/issue-9-add-reliable-retry-path"]
+    assert deleted == ["orch/issue-9"]
     assert prs[0]["title"] == "fix(pipeline): add reliable retry path"
     assert "## Что сделано" in str(prs[0]["body"])
     assert "Closes #9" in str(prs[0]["body"])
@@ -262,6 +264,7 @@ def test_exhausted_attempts_mark_needs_human(
 
     monkeypatch.setattr(pipeline.gitops, "clone_source", clone_source)
     monkeypatch.setattr(pipeline.gitops, "cleanup_source", lambda _source: None)
+    monkeypatch.setattr(pipeline.github, "find_open_pr_for_issue", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(pipeline.github, "find_open_pr", lambda *_args: None)
     monkeypatch.setattr(pipeline.github, "delete_branch", lambda *_args: None)
     monkeypatch.setattr(pipeline.github, "comment_issue", lambda *_args: None)
@@ -316,6 +319,7 @@ def _prepare_cancellation_pipeline(
 
     monkeypatch.setattr(pipeline.gitops, "clone_source", clone_source)
     monkeypatch.setattr(pipeline.gitops, "cleanup_source", lambda _source: None)
+    monkeypatch.setattr(pipeline.github, "find_open_pr_for_issue", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(pipeline.github, "find_open_pr", lambda *_args: None)
     monkeypatch.setattr(pipeline.github, "edit_labels", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(pipeline.github, "comment_issue", lambda *_args, **_kwargs: None)
@@ -457,11 +461,13 @@ def test_closed_issue_cancels_before_pull_request(
         _config: Config,
         _issue: Issue,
         run_dir: Path,
+        *,
+        branch: str,
         **_kwargs: object,
     ) -> WorkerResult:
         return WorkerResult(
             run_dir=run_dir,
-            branch="fix/pipeline/issue-9-add-reliable-retry-path",
+            branch=branch,
             handoff=_handoff(),
             tests_output="passed",
             bundle_path=run_dir / "result.bundle",
@@ -505,11 +511,13 @@ def test_issue_state_error_does_not_cancel_the_run(
         _config: Config,
         _issue: Issue,
         run_dir: Path,
+        *,
+        branch: str,
         **_kwargs: object,
     ) -> WorkerResult:
         return WorkerResult(
             run_dir=run_dir,
-            branch="fix/pipeline/issue-9-add-reliable-retry-path",
+            branch=branch,
             handoff=_handoff(),
             tests_output="passed",
             bundle_path=run_dir / "result.bundle",

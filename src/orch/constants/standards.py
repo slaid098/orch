@@ -14,6 +14,7 @@ COMMIT_TYPES = (
     "perf",
 )
 TITLE_MAX_LENGTH = 72
+PR_ISSUE_MARKER = "<!-- orch:issue={issue_number} -->"
 ISSUE_BODY_HEADINGS = ("## Что сделать", "## Почему")
 PR_HEADINGS = (
     "## Что сделано",

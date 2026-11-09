@@ -258,6 +258,129 @@ def test_find_open_pr_rejects_invalid_json(
         github.find_open_pr("slaid098/orch", "branch", "token")
 
 
+def test_find_open_pr_for_issue_prefers_the_expected_head(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        github,
+        "find_open_pr",
+        lambda *_args: "https://example.test/pr/7",
+    )
+
+    ref = github.find_open_pr_for_issue(
+        "slaid098/orch",
+        7,
+        "token",
+        preferred_head="orch/issue-7",
+    )
+
+    assert ref is not None
+    assert ref.number == 7
+    assert ref.url == "https://example.test/pr/7"
+    assert ref.head_ref == "orch/issue-7"
+
+
+@pytest.mark.parametrize(
+    "item",
+    [
+        {
+            "number": 7,
+            "url": "https://example.test/pr/7",
+            "headRefName": "orch/issue-7",
+            "body": "<!-- orch:issue=7 -->",
+            "isCrossRepository": False,
+        },
+        {
+            "number": 7,
+            "url": "https://example.test/pr/7",
+            "headRefName": "feature/change",
+            "body": "Closes #7",
+            "isCrossRepository": False,
+        },
+        {
+            "number": 7,
+            "url": "https://example.test/pr/7",
+            "headRefName": "fix/pipeline/issue-7-reliable-retry-path",
+            "body": "",
+            "isCrossRepository": False,
+        },
+    ],
+)
+def test_find_open_pr_for_issue_matches_known_markers(
+    monkeypatch: pytest.MonkeyPatch,
+    item: dict[str, object],
+) -> None:
+    monkeypatch.setattr(
+        github,
+        "_run_gh",
+        lambda *_args, **_kwargs: json.dumps([item]),
+    )
+
+    ref = github.find_open_pr_for_issue("slaid098/orch", 7, "token")
+
+    assert ref is not None
+    assert ref.number == 7
+    assert ref.head_ref == item["headRefName"]
+
+
+def test_find_open_pr_for_issue_ignores_cross_repository_prs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = [
+        {
+            "number": 7,
+            "url": "https://example.test/pr/7",
+            "headRefName": "orch/issue-7",
+            "body": "Closes #7",
+            "isCrossRepository": True,
+        }
+    ]
+    monkeypatch.setattr(
+        github,
+        "_run_gh",
+        lambda *_args, **_kwargs: json.dumps(payload),
+    )
+
+    assert github.find_open_pr_for_issue("slaid098/orch", 7, "token") is None
+
+
+def test_find_open_pr_for_issue_rejects_multiple_matches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = [
+        {
+            "number": 7,
+            "url": "https://example.test/pr/7",
+            "headRefName": "orch/issue-7",
+            "body": "Closes #7",
+            "isCrossRepository": False,
+        },
+        {
+            "number": 8,
+            "url": "https://example.test/pr/8",
+            "headRefName": "orch/issue-7-old",
+            "body": "<!-- orch:issue=7 -->",
+            "isCrossRepository": False,
+        },
+    ]
+    monkeypatch.setattr(
+        github,
+        "_run_gh",
+        lambda *_args, **_kwargs: json.dumps(payload),
+    )
+
+    with pytest.raises(github.GitHubError, match="Multiple open pull requests"):
+        github.find_open_pr_for_issue("slaid098/orch", 7, "token")
+
+
+def test_find_open_pr_for_issue_returns_none_without_match(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(github, "_run_gh", lambda *_args, **_kwargs: "[]")
+
+    assert github.find_open_pr_for_issue("slaid098/orch", 7, "token") is None
+
+
 def test_delete_branch_ignores_missing_ref(monkeypatch: pytest.MonkeyPatch) -> None:
     def fail(*_args: object, **_kwargs: object) -> None:
         raise github.GitHubError("missing")

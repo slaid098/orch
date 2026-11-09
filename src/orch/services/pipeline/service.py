@@ -51,7 +51,7 @@ from orch.services.pipeline.publish import (
     _delete_stale_branch as _delete_stale_branch,
 )
 from orch.services.pipeline.publish import (
-    _find_open_pr,
+    _find_open_pr_for_issue,
     _publish_success,
     _revision_problem,
 )
@@ -154,7 +154,7 @@ def _resolve_identity(
 ) -> tuple[str, str] | RunOutcome:
     try:
         title = validate_title(issue.title)
-        return title, branch_name(title, issue.number)
+        return title, branch_name(issue.number)
     except StandardsError as ex:
         store.create_run(
             config.data_dir / "orch.db",
@@ -187,7 +187,13 @@ def _start_run(
 ) -> RunOutcome:
     repo = config.repo.full_name
     try:
-        existing_pr = _find_open_pr(repo, branch, token, strict=True)
+        existing = _find_open_pr_for_issue(
+            repo,
+            issue.number,
+            token,
+            preferred_head=branch,
+            strict=True,
+        )
     except GitHubError as ex:
         return _park_before_attempts(
             config,
@@ -198,6 +204,22 @@ def _start_run(
             branch=branch,
             error=RuntimeError(f"Could not verify whether an open PR exists: {ex}"),
         )
+    existing_pr = existing.url if existing is not None else None
+    if existing is not None:
+        branch = existing.head_ref
+        try:
+            validate_branch(branch, issue.number)
+        except StandardsError as ex:
+            return _park_before_attempts(
+                config,
+                issue,
+                token,
+                run_dir=run_dir,
+                run_id=run_id,
+                branch=branch,
+                error=ex,
+                pr_url=existing_pr,
+            )
     queued = config.labels.queued in issue.labels
     if existing_pr and not queued:
         return _finish_existing_pr(config, issue, token, run_dir, run_id, branch, existing_pr)
@@ -1057,6 +1079,7 @@ def _run_attempt(
         run_dir / f"attempt-{attempt}",
         source=source,
         workspace=workspace,
+        branch=branch,
         attempt=attempt,
         previous_error=previous_error,
         timeout_seconds=timeout_seconds,
@@ -1146,6 +1169,7 @@ def _run_worker_attempt(
     *,
     source: Path,
     workspace: Path,
+    branch: str,
     attempt: int,
     previous_error: Exception | None,
     timeout_seconds: int,
@@ -1174,16 +1198,16 @@ def _run_worker_attempt(
         attempt_dir,
         source_path=source,
         workspace_path=workspace,
+        branch=branch,
         attempt=attempt,
         previous_error=str(previous_error) if previous_error else None,
         timeout_seconds=remaining,
         **extra,
     )
     validate_branch(worker.branch, issue.number)
-    expected_branch = branch_name(issue.title, issue.number)
-    if worker.branch != expected_branch:
+    if worker.branch != branch:
         raise StandardsError(
-            f"Worker returned branch {worker.branch!r}, expected {expected_branch!r}"
+            f"Worker returned branch {worker.branch!r}, expected {branch!r}"
         )
     return worker
 

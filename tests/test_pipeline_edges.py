@@ -13,7 +13,7 @@ from orch.schemas.config.types import (
     ReviewerConfig,
     WorkerConfig,
 )
-from orch.schemas.github.types import Issue, PullRequestStatus
+from orch.schemas.github.types import Issue, PullRequestRef, PullRequestStatus
 from orch.schemas.standards.types import Handoff
 from orch.schemas.worker.types import WorkerResult
 from orch.services import store
@@ -65,6 +65,13 @@ def _worker(run_dir: Path, branch: str) -> WorkerResult:
     )
 
 
+def _pr_ref(
+    url: str = "https://example.test/pr/9",
+    head: str = "fix/pipeline/issue-9-add-reliable-retry-path",
+) -> PullRequestRef:
+    return PullRequestRef(number=9, url=url, head_ref=head)
+
+
 def test_existing_pr_is_reused(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -77,8 +84,8 @@ def test_existing_pr_is_reused(
 
     monkeypatch.setattr(
         pipeline.github,
-        "find_open_pr",
-        lambda *_args: "https://example.test/pr/9",
+        "find_open_pr_for_issue",
+        lambda *_args, **_kwargs: _pr_ref(),
     )
     monkeypatch.setattr(
         pipeline.github,
@@ -129,6 +136,11 @@ def test_queued_existing_pr_revises_the_saved_workspace(
     labels: list[tuple[tuple[str, ...], tuple[str, ...]]] = []
     cleaned: list[Path] = []
 
+    monkeypatch.setattr(
+        pipeline.github,
+        "find_open_pr_for_issue",
+        lambda *_args, **_kwargs: _pr_ref(pr_url),
+    )
     monkeypatch.setattr(pipeline.github, "find_open_pr", lambda *_args: pr_url)
     monkeypatch.setattr(pipeline.github, "issue_is_open", lambda *_args: True)
     monkeypatch.setattr(
@@ -210,6 +222,11 @@ def test_queued_existing_pr_without_workspace_is_parked(
 
     monkeypatch.setattr(
         pipeline.github,
+        "find_open_pr_for_issue",
+        lambda *_args, **_kwargs: _pr_ref(),
+    )
+    monkeypatch.setattr(
+        pipeline.github,
         "find_open_pr",
         lambda *_args: "https://example.test/pr/9",
     )
@@ -262,10 +279,10 @@ def test_existing_pr_lookup_failure_parks_instead_of_starting_fresh(
     store.init_db(config.data_dir / "orch.db")
     comments: list[str] = []
 
-    def fail(*_args: object) -> str | None:
+    def fail(*_args: object, **_kwargs: object) -> PullRequestRef | None:
         raise GitHubError("offline")
 
-    monkeypatch.setattr(pipeline.github, "find_open_pr", fail)
+    monkeypatch.setattr(pipeline.github, "find_open_pr_for_issue", fail)
     monkeypatch.setattr(
         pipeline.github,
         "comment_issue",
@@ -294,6 +311,11 @@ def test_revision_refuses_a_workspace_behind_the_pr_head(
     workspace = config.data_dir / "workspaces" / "slaid098__orch" / "issue-9"
     (workspace / ".git").mkdir(parents=True)
 
+    monkeypatch.setattr(
+        pipeline.github,
+        "find_open_pr_for_issue",
+        lambda *_args, **_kwargs: _pr_ref(),
+    )
     monkeypatch.setattr(
         pipeline.github,
         "find_open_pr",
@@ -338,7 +360,11 @@ def test_source_preparation_failure_is_parked(
     store.init_db(config.data_dir / "orch.db")
     comments: list[str] = []
 
-    monkeypatch.setattr(pipeline.github, "find_open_pr", lambda *_args: None)
+    monkeypatch.setattr(
+        pipeline.github,
+        "find_open_pr_for_issue",
+        lambda *_args, **_kwargs: None,
+    )
     monkeypatch.setattr(
         pipeline.gitops,
         "refresh_mirror",
@@ -366,12 +392,12 @@ def test_find_open_pr_failure_is_ignored(
 
     monkeypatch.setattr(pipeline.github, "find_open_pr", fail)
 
-    assert pipeline._find_open_pr("slaid098/orch", "branch", "token") is None
+    assert publish._find_open_pr("slaid098/orch", "branch", "token") is None
     with pytest.raises(GitHubError, match="offline"):
-        pipeline._find_open_pr("slaid098/orch", "branch", "token", strict=True)
+        publish._find_open_pr("slaid098/orch", "branch", "token", strict=True)
 
 
-def test_worker_branch_must_match_the_issue_title(
+def test_worker_branch_must_match_the_requested_branch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -398,7 +424,7 @@ def test_worker_branch_must_match_the_issue_title(
 
     assert outcome.status == "needs_human"
     assert "expected" in (outcome.error or "")
-    assert deleted == ["fix/pipeline/issue-9-add-reliable-retry-path"]
+    assert deleted == ["orch/issue-9"]
 
 
 def test_worker_branch_must_be_valid(
@@ -418,13 +444,18 @@ def test_worker_branch_must_be_valid(
     outcome = pipeline.run_issue(config, _issue(), "token", attempt_timeout_seconds=10)
 
     assert outcome.status == "needs_human"
-    assert "Branch must match" in (outcome.error or "")
+    assert "Branch must be" in (outcome.error or "")
 
 
 def _prepare_pipeline(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    monkeypatch.setattr(
+        pipeline.github,
+        "find_open_pr_for_issue",
+        lambda *_args, **_kwargs: None,
+    )
     monkeypatch.setattr(pipeline.github, "find_open_pr", lambda *_args: None)
     monkeypatch.setattr(pipeline.github, "delete_branch", lambda *_args: None)
     monkeypatch.setattr(pipeline.github, "comment_issue", lambda *_args: None)
@@ -750,6 +781,11 @@ def test_revision_retry_tracks_the_head_pushed_by_the_previous_attempt(
     workers: list[str | None] = []
     checks = iter([GitHubError("checks failed"), "CI: success"])
 
+    monkeypatch.setattr(
+        pipeline.github,
+        "find_open_pr_for_issue",
+        lambda *_args, **_kwargs: _pr_ref(pr_url),
+    )
     monkeypatch.setattr(pipeline.github, "find_open_pr", lambda *_args: pr_url)
     monkeypatch.setattr(pipeline.github, "issue_is_open", lambda *_args: True)
     monkeypatch.setattr(
