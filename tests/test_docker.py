@@ -20,7 +20,7 @@ def test_start_worker_requires_an_image(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(docker, "_image_exists", lambda _image: False)
+    monkeypatch.setattr(docker, "image_exists", lambda _image: False)
 
     with pytest.raises(docker.DockerError, match="does not exist"):
         docker.start_worker(
@@ -38,7 +38,7 @@ def test_start_worker_runs_a_container(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     args: list[str] = []
-    monkeypatch.setattr(docker, "_image_exists", lambda _image: True)
+    monkeypatch.setattr(docker, "image_exists", lambda _image: True)
     monkeypatch.setattr(
         docker,
         "_run",
@@ -65,7 +65,7 @@ def test_start_worker_rejects_empty_container_id(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(docker, "_image_exists", lambda _image: True)
+    monkeypatch.setattr(docker, "image_exists", lambda _image: True)
     monkeypatch.setattr(docker, "_run", lambda *_args, **_kwargs: _proc(""))
 
     with pytest.raises(docker.DockerError, match="no container id"):
@@ -221,14 +221,32 @@ def test_image_exists_uses_inspect_exit_code(
         "_run",
         lambda *_args, **_kwargs: _proc(code=0),
     )
-    assert docker._image_exists("image")
+    assert docker.image_exists("image")
 
     monkeypatch.setattr(
         docker,
         "_run",
         lambda *_args, **_kwargs: _proc(code=1),
     )
-    assert not docker._image_exists("image")
+    assert not docker.image_exists("image")
+
+
+def test_daemon_available_uses_docker_info_exit_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        docker,
+        "_run",
+        lambda *_args, **_kwargs: _proc(code=0),
+    )
+    assert docker.daemon_available()
+
+    monkeypatch.setattr(
+        docker,
+        "_run",
+        lambda *_args, **_kwargs: _proc(code=1),
+    )
+    assert not docker.daemon_available()
 
 
 def test_run_rejects_failed_command(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -282,7 +300,7 @@ def test_start_reviewer_mounts_repository_read_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[list[str]] = []
-    monkeypatch.setattr(docker, "_image_exists", lambda _image: True)
+    monkeypatch.setattr(docker, "image_exists", lambda _image: True)
     monkeypatch.setattr(
         docker,
         "_ensure_review_isolation",
@@ -320,7 +338,7 @@ def test_start_reviewer_requires_an_image(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(docker, "_image_exists", lambda _image: False)
+    monkeypatch.setattr(docker, "image_exists", lambda _image: False)
 
     with pytest.raises(docker.DockerError, match="does not exist"):
         docker.start_reviewer(

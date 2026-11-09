@@ -86,6 +86,22 @@ def test_ensure_user_rejects_another_account(
         github.ensure_user("token", "slaid098")
 
 
+def test_check_repo_reads_the_repository(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    def run(args: list[str], _token: str, **_kwargs: object) -> str:
+        calls.append(args)
+        return "{}"
+
+    monkeypatch.setattr(github, "_run_gh", run)
+
+    github.check_repo("slaid098/orch", "token")
+
+    assert calls[0][:3] == ["repo", "view", "slaid098/orch"]
+
+
 def test_ensure_labels_creates_each_label(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

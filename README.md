@@ -198,7 +198,22 @@ must use HTTPS; plain HTTP is accepted only for local or private addresses such
 as `host.docker.internal`, `localhost`, loopback, and RFC1918 hosts.
 
 Create the issue on GitHub and add the `agent:queued` label. Add `agent:hold`
-at any time before dispatch to keep orch away from the issue. Run the daemon:
+at any time before dispatch to keep orch away from the issue. Before the first
+run, or after changing the image, model endpoint, or credentials, verify the
+environment:
+
+```powershell
+uv run python main.py --check
+```
+
+`--check` takes no instance lock and changes nothing remote. It verifies the
+Docker daemon and both images, the model endpoint at `127.0.0.1:11434`, the
+GitHub token owner and repository access, the base branch, and free disk space.
+It prints every problem and exits with code `1` if any check fails. The daemon
+and `--once` run the same checks after taking the lock and before touching
+labels, the database, or containers.
+
+Run the daemon:
 
 ```powershell
 $env:GH_TOKEN = (gh auth token --user slaid098)
@@ -255,21 +270,21 @@ review and merge the pull request yourself, or close it and the issue when done.
 Use this checklist for the first controlled run against a real issue. Complete
 [Setup](#setup) first.
 
-1. **Check Docker and the worker image.** Both commands must succeed:
+1. **Run the startup checks.** This verifies Docker, both images, the model
+   endpoint, GitHub access, the base branch, and free disk space:
 
    ```powershell
-   docker info
-   docker image inspect orch-agent:latest
+   uv run python main.py --check
    ```
 
-   If the image is missing, build it from the repository root:
+   If the worker image is missing, build it from the repository root:
 
    ```powershell
    docker build -f docker/agent.Dockerfile -t orch-agent:latest .
    ```
 
    If `worker.image`, or a separately configured `reviewer.image`, uses another
-   tag, inspect that tag instead.
+   tag, build and inspect that tag instead.
 
 2. **Check the target repository.** The issue must be created in the GitHub
    repository configured as `repo.owner`/`repo.name`. `orch` talks to GitHub
@@ -432,6 +447,10 @@ Rotation happens at daemon startup and after every finished issue; old files are
 deleted, not archived. Persistent issue workspaces are intentionally kept for
 manual review and revision; remove them manually after their PRs and issues are
 closed.
+
+`min_free_disk_gb` (default 5) is the minimum free space on the `data_dir`
+volume. Both `--check` and normal daemon startup fail before taking work when
+the volume has less space.
 
 ## Security model
 
