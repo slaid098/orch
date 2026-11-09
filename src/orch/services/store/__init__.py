@@ -6,6 +6,7 @@ from orch.services.store.service import (
     has_active_run,
     init_db,
     interrupt_active_runs,
+    prune_old_runs,
 )
 
 __all__ = [
@@ -14,4 +15,5 @@ __all__ = [
     "has_active_run",
     "init_db",
     "interrupt_active_runs",
+    "prune_old_runs",
 ]

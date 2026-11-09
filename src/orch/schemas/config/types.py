@@ -134,6 +134,7 @@ class Config:
     poll_interval_seconds: int = 30
     max_workers: int = 2
     retention_days: int = 7
+    workspace_retention_days: int = 14
     min_free_disk_gb: int = 5
     gh_token: str | None = None
     telegram: TelegramConfig = field(default_factory=TelegramConfig)

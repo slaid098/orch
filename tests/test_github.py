@@ -102,6 +102,59 @@ def test_check_repo_reads_the_repository(
     assert calls[0][:3] == ["repo", "view", "slaid098/orch"]
 
 
+def test_open_pr_issue_numbers_lists_open_prs_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = [
+        {
+            "number": 1,
+            "url": "https://example.test/pr/1",
+            "headRefName": "orch/issue-5",
+            "body": "",
+            "isCrossRepository": False,
+        },
+        {
+            "number": 2,
+            "url": "https://example.test/pr/2",
+            "headRefName": "feat/x",
+            "body": "Closes #6",
+            "isCrossRepository": False,
+        },
+        {
+            "number": 3,
+            "url": "https://example.test/pr/3",
+            "headRefName": "orch/issue-7",
+            "body": "",
+            "isCrossRepository": True,
+        },
+    ]
+    calls: list[list[str]] = []
+
+    def run(args: list[str], _token: str, **_kwargs: object) -> str:
+        calls.append(args)
+        return json.dumps(payload)
+
+    monkeypatch.setattr(github, "_run_gh", run)
+
+    assert github.open_pr_issue_numbers("slaid098/orch", {5, 6, 7, 8}, "token") == {
+        5,
+        6,
+    }
+    assert len(calls) == 1
+
+
+def test_open_pr_issue_numbers_skips_an_empty_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        github,
+        "_run_gh",
+        lambda *_args, **_kwargs: pytest.fail("an empty request must not call gh"),
+    )
+
+    assert github.open_pr_issue_numbers("slaid098/orch", set(), "token") == set()
+
+
 def test_ensure_labels_creates_each_label(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
