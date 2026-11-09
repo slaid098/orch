@@ -49,6 +49,7 @@ data_dir: data
     assert config.worker.test_commands == ("uv run pytest -q",)
     assert config.max_workers == 2
     assert config.retention_days == 7
+    assert config.workspace_retention_days == 14
     assert config.min_free_disk_gb == 5
     assert config.data_dir == (tmp_path / "data").resolve()
     assert config.gh_token == "test-token"
@@ -88,6 +89,7 @@ reviewer:
   auto_merge: true
 max_workers: 3
 retention_days: 14
+workspace_retention_days: 30
 min_free_disk_gb: 20
 """,
     )
@@ -102,6 +104,7 @@ min_free_disk_gb: 20
     assert config.reviewer.auto_merge is True
     assert config.max_workers == 3
     assert config.retention_days == 14
+    assert config.workspace_retention_days == 30
     assert config.min_free_disk_gb == 20
 
 
@@ -581,6 +584,29 @@ worker:
   test_commands:
     - pytest
 min_free_disk_gb: 0
+""",
+    )
+
+    with pytest.raises(ConfigError):
+        load_config(config_path)
+
+
+def test_load_config_rejects_invalid_workspace_retention(
+    tmp_path: Path,
+) -> None:
+    repo_path = tmp_path / "repo"
+    (repo_path / ".git").mkdir(parents=True)
+    config_path = _write_config(
+        tmp_path,
+        f"""
+repo:
+  owner: slaid098
+  name: orch
+  path: {repo_path.as_posix()}
+worker:
+  test_commands:
+    - pytest
+workspace_retention_days: 0
 """,
     )
 

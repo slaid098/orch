@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 from contextlib import closing
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from orch.config.logger import get_logger
@@ -110,6 +110,31 @@ def interrupt_active_runs(db_path: Path, repo: str) -> int:
         count = cursor.rowcount
     if count:
         log.warning("Interrupted {} active run(s) for {}", count, repo)
+    return count
+
+
+def prune_old_runs(db_path: Path, retention_days: int) -> int:
+    """Delete finished runs older than the retention window.
+
+    Args:
+        db_path: SQLite database path.
+        retention_days: Age in days after which a finished run row is removed.
+
+    Returns:
+        Number of deleted run rows.
+    """
+    if not db_path.exists():
+        return 0
+    cutoff = (datetime.now(UTC) - timedelta(days=retention_days)).isoformat()
+    with closing(_connect(db_path)) as conn:
+        cursor = conn.execute(
+            "DELETE FROM runs WHERE finished_at IS NOT NULL AND finished_at < ?",
+            (cutoff,),
+        )
+        conn.commit()
+        count = cursor.rowcount
+    if count:
+        log.info("Removed {} expired run row(s)", count)
     return count
 
 

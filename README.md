@@ -53,9 +53,10 @@ persisted in `<run-dir>/feedback.json`.
 Closing the issue is the cancellation signal. The comment poller notices it,
 stops the worker container, and abandons the attempt without retrying and
 without opening a pull request. The persistent workspace remains under
-`app_data/workspaces/<owner>__<repo>/issue-N`; it is not pruned by
-`retention_days`. Reopening the issue and adding `agent:queued` again resumes
-from the same workspace.
+`app_data/workspaces/<owner>__<repo>/issue-N` and is kept while the issue is
+revised. It is pruned only after the workspace has had no open pull request for
+`workspace_retention_days`. Reopening the issue and adding `agent:queued` again
+resumes from the same workspace.
 
 ## Reviewer and merge policy
 
@@ -442,11 +443,15 @@ inherits it. `reviewer.autocompact` applies the same setting to reviewer
 containers; both roles use `200k` so the shared model and image behave
 consistently. `auto` leaves the window to Claude Code.
 
-`retention_days` (default 7) removes old run directories and rotated logs.
-Rotation happens at daemon startup and after every finished issue; old files are
-deleted, not archived. Persistent issue workspaces are intentionally kept for
-manual review and revision; remove them manually after their PRs and issues are
-closed.
+`retention_days` (default 7) removes old run directories, rotated logs, and
+finished rows from the SQLite run database. Rotation happens at daemon startup
+and after every finished issue; old data is deleted, not archived.
+
+`workspace_retention_days` (default 14) removes an issue workspace only when no
+run is active, the issue has no open pull request, and the newest file in the
+workspace is older than the window. The check runs at daemon startup and after
+every finished issue. If the open-pull-request lookup fails, every workspace is
+kept and the check is retried on the next pass.
 
 `min_free_disk_gb` (default 5) is the minimum free space on the `data_dir`
 volume. Both `--check` and normal daemon startup fail before taking work when

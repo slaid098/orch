@@ -6,6 +6,7 @@ import json
 import os
 import re
 import subprocess
+from collections.abc import Iterable
 from typing import Any
 from urllib.parse import quote
 
@@ -358,6 +359,35 @@ def find_open_pr_for_issue(
     if not url or not head or not isinstance(number, int):
         raise GitHubError("Open pull request is missing its number, URL, or head branch")
     return PullRequestRef(number=number, url=url, head_ref=head)
+
+
+def open_pr_issue_numbers(
+    repo: str,
+    issue_numbers: Iterable[int],
+    token: str,
+) -> set[int]:
+    """Return which of the given issues have an open pull request.
+
+    Args:
+        repo: Repository in ``owner/name`` form.
+        issue_numbers: Candidate issue numbers.
+        token: GitHub token.
+
+    Returns:
+        Issue numbers with at least one matching open pull request.
+
+    Raises:
+        GitHubError: If the pull-request list cannot be fetched or parsed.
+    """
+    wanted = set(issue_numbers)
+    if not wanted:
+        return set()
+    pull_requests = _list_open_prs(repo, token)
+    return {
+        number
+        for number in wanted
+        if any(_belongs_to_issue(item, number) for item in pull_requests)
+    }
 
 
 def _list_open_prs(repo: str, token: str) -> list[dict[str, Any]]:

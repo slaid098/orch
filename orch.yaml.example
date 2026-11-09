@@ -63,6 +63,7 @@ mcp:
 
 data_dir: D:/orch/app_data
 retention_days: 7
+workspace_retention_days: 14
 min_free_disk_gb: 5
 poll_interval_seconds: 30
 max_workers: 2

@@ -282,16 +282,45 @@ def test_reap_finished_removes_completed_and_failed_futures(
     failed = FakeFuture(done=True, error=RuntimeError("broken"))
     active = {7: completed, 8: failed, 9: FakeFuture(done=False)}
     pruned: list[tuple[Path, int]] = []
+    db_pruned: list[tuple[Path, int]] = []
     monkeypatch.setattr(
         daemon,
         "prune_runs",
         lambda data_dir, days: pruned.append((data_dir, days)),
+    )
+    monkeypatch.setattr(
+        daemon.store,
+        "prune_old_runs",
+        lambda db_path, days: db_pruned.append((db_path, days)),
     )
 
     daemon._reap_finished(active, _config(tmp_path))
 
     assert list(active) == [9]
     assert pruned == [(tmp_path / "data", 7)]
+    assert db_pruned == [(tmp_path / "data" / "orch.db", 7)]
+
+
+def test_reap_finished_prunes_workspaces_and_skips_active_issues(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    active = {7: FakeFuture(done=True, result=_outcome()), 9: FakeFuture(done=False)}
+    calls: list[tuple[Config, str, set[int]]] = []
+    monkeypatch.setattr(daemon, "prune_runs", lambda *_args: None)
+    monkeypatch.setattr(daemon.store, "prune_old_runs", lambda *_args: None)
+    monkeypatch.setattr(
+        daemon,
+        "prune_workspaces",
+        lambda cfg, token, *, active_issues: calls.append(
+            (cfg, token, set(active_issues))
+        ),
+    )
+
+    daemon._reap_finished(active, config, "token")
+
+    assert calls == [(config, "token", {9})]
 
 
 def test_claim_issue_returns_true_on_success(

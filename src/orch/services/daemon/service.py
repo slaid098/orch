@@ -16,7 +16,7 @@ from orch.services import github, notify, store
 from orch.services.docker import cleanup_managed
 from orch.services.github.service import ensure_labels, ensure_user
 from orch.services.pipeline import run_issue
-from orch.services.retention import prune_runs
+from orch.services.retention import prune_runs, prune_workspaces
 
 log = get_logger(component="daemon")
 
@@ -157,6 +157,8 @@ def run_daemon(config: Config, token: str) -> int:
     )
     _reconcile_startup(config, token)
     prune_runs(config.data_dir, config.retention_days)
+    store.prune_old_runs(config.data_dir / "orch.db", config.retention_days)
+    prune_workspaces(config, token)
     db_path = config.data_dir / "orch.db"
     active: dict[int, Future[RunOutcome]] = {}
     poll_failed_at: float | None = None
@@ -290,6 +292,9 @@ def _reap_finished(
             )
     if finished:
         prune_runs(config.data_dir, config.retention_days)
+        store.prune_old_runs(config.data_dir / "orch.db", config.retention_days)
+        if token:
+            prune_workspaces(config, token, active_issues=set(active))
 
 
 def _notify_outcome(
