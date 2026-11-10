@@ -76,6 +76,18 @@ def get_issue(config: Config, number: int, token: str) -> Issue:
     return github.get_issue(config.repo.full_name, number, token)
 
 
+def list_blockers(config: Config, number: int, token: str) -> list[Issue]:
+    """Return the issues that block the given issue."""
+    if _is_forgejo(config):
+        return forgejo.list_blockers(
+            config.repo.url,
+            config.repo.full_name,
+            number,
+            token,
+        )
+    return github.list_blockers(config.repo.full_name, number, token)
+
+
 def issue_is_open(config: Config, number: int, token: str) -> bool:
     """Return whether an issue is still open."""
     if _is_forgejo(config):

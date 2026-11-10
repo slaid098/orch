@@ -46,6 +46,7 @@ _CASES = [
     ("ensure_labels", ("token", [("a", "b", "c")]), {}),
     ("list_ready_issues", ("agent:queued", "token"), {}),
     ("get_issue", (7, "token"), {}),
+    ("list_blockers", (7, "token"), {}),
     ("issue_is_open", (7, "token"), {}),
     (
         "edit_labels",

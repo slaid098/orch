@@ -1094,3 +1094,142 @@ def test_paged_walks_every_page(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert len(issues) == 51
     assert issues[-1].number == 51
+
+
+def test_list_blockers_maps_fields_and_deduplicates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _use(
+        monkeypatch,
+        {
+            ("GET", f"repos/{_REPO}/issues/7/dependencies"): [
+                _issue_payload(3, state="closed"),
+                _issue_payload(4),
+                _issue_payload(3, state="closed"),
+            ]
+        },
+    )
+
+    blockers = forgejo.list_blockers(_BASE, _REPO, 7, "token")
+
+    assert [blocker.number for blocker in blockers] == [3, 4]
+    assert blockers[0].state == "CLOSED"
+    assert blockers[1].state == "OPEN"
+    assert blockers[0].author == "author"
+    assert blockers[0].url.endswith("/issues/3")
+
+
+def test_list_blockers_walks_every_page(monkeypatch: pytest.MonkeyPatch) -> None:
+    first = [_issue_payload(number) for number in range(1, 51)]
+    second = [_issue_payload(51, state="closed")]
+
+    def page(query: dict[str, list[str]], _body: object) -> list[dict[str, object]]:
+        return first if query["page"] == ["1"] else second
+
+    api = _use(
+        monkeypatch,
+        {("GET", f"repos/{_REPO}/issues/7/dependencies"): page},
+    )
+
+    blockers = forgejo.list_blockers(_BASE, _REPO, 7, "token")
+
+    assert len(blockers) == 51
+    assert blockers[-1].number == 51
+    assert api.requests[0]["query"]["limit"] == ["50"]
+    assert api.requests[1]["query"]["page"] == ["2"]
+
+
+def test_list_blockers_treats_a_404_as_no_dependencies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _use(
+        monkeypatch,
+        {
+            ("GET", f"repos/{_REPO}/issues/7/dependencies"): _http_error(
+                404,
+                "not found",
+            )
+        },
+    )
+
+    assert forgejo.list_blockers(_BASE, _REPO, 7, "token") == []
+
+
+def test_list_blockers_fails_closed_when_a_network_error_mentions_404(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _use(
+        monkeypatch,
+        {
+            ("GET", f"repos/{_REPO}/issues/7/dependencies"): URLError(
+                "Tunnel connection failed: 404 Not Found"
+            )
+        },
+    )
+
+    with pytest.raises(ForgejoError, match="Could not reach"):
+        forgejo.list_blockers(_BASE, _REPO, 7, "token")
+
+
+def test_list_blockers_fails_closed_when_an_untagged_error_mentions_404(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail(*_args: object, **_kwargs: object) -> None:
+        raise ForgejoError("Forgejo API GET x failed with 404: gone")
+
+    monkeypatch.setattr(forgejo, "_request", fail)
+
+    with pytest.raises(ForgejoError, match="404"):
+        forgejo.list_blockers(_BASE, _REPO, 7, "token")
+
+
+def test_list_blockers_reraises_other_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _use(
+        monkeypatch,
+        {
+            ("GET", f"repos/{_REPO}/issues/7/dependencies"): _http_error(
+                500,
+                "boom",
+            )
+        },
+    )
+
+    with pytest.raises(ForgejoError, match="boom"):
+        forgejo.list_blockers(_BASE, _REPO, 7, "token")
+
+
+def test_list_blockers_fails_when_a_later_page_disappears(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = [_issue_payload(number) for number in range(1, 51)]
+
+    def page(query: dict[str, list[str]], _body: object) -> list[dict[str, object]]:
+        if query["page"] == ["1"]:
+            return first
+        raise _http_error(404, "missing")
+
+    _use(
+        monkeypatch,
+        {("GET", f"repos/{_REPO}/issues/7/dependencies"): page},
+    )
+
+    with pytest.raises(ForgejoError, match="404"):
+        forgejo.list_blockers(_BASE, _REPO, 7, "token")
+
+
+def test_list_blockers_rejects_an_invalid_item(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _use(
+        monkeypatch,
+        {
+            ("GET", f"repos/{_REPO}/issues/7/dependencies"): [
+                {"title": "missing a number"},
+            ]
+        },
+    )
+
+    with pytest.raises(ForgejoError, match="Could not parse"):
+        forgejo.list_blockers(_BASE, _REPO, 7, "token")

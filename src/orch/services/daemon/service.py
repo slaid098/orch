@@ -115,6 +115,16 @@ def run_once(config: Config, token: str, issue_number: int) -> int:
         )
         return 1
 
+    unfinished = _open_blockers(config, issue.number, token, {})
+    if unfinished is None:
+        return 1
+    if unfinished:
+        log.bind(
+            issue=issue.number,
+            blockers=[blocker.number for blocker in unfinished],
+        ).warning("Issue is blocked by open dependencies; refusing to run")
+        return 1
+
     notify.notify_accepted(
         config,
         issue.number,
@@ -281,6 +291,41 @@ def _poll_project(
     _dispatch_issues(issues, active, config, token, db_path, executor)
 
 
+def _open_blockers(
+    config: Config,
+    number: int,
+    token: str,
+    cache: dict[int, list[Issue] | None],
+) -> list[Issue] | None:
+    """Return the unfinished blockers of an issue, or ``None`` on failure.
+
+    A blocker counts as finished only when its state is ``CLOSED``. Missing
+    or unknown states stay blocking (fail-closed). Results, including a failed
+    lookup, are cached for one dispatch pass so each issue is queried at most
+    once per poll.
+    """
+    if number in cache:
+        return cache[number]
+    try:
+        blockers = forge.list_blockers(config, number, token)
+    except ForgeError as ex:
+        log.bind(
+            repo=config.repo.full_name,
+            issue=number,
+            error=ex,
+            error_type=type(ex).__name__,
+        ).error("Could not read issue dependencies; refusing to start")
+        cache[number] = None
+        return None
+    unfinished = [
+        blocker
+        for blocker in blockers
+        if str(blocker.state or "").upper() != "CLOSED"
+    ]
+    cache[number] = unfinished
+    return unfinished
+
+
 def _dispatch_issues(
     issues: list[Issue],
     active: dict[int | _ActiveKey, Future[RunOutcome]],
@@ -290,6 +335,7 @@ def _dispatch_issues(
     executor: ThreadPoolExecutor,
 ) -> None:
     repo = config.repo.full_name
+    blocker_cache: dict[int, list[Issue] | None] = {}
     for index, issue in enumerate(issues):
         if len(active) >= config.max_workers:
             break
@@ -300,6 +346,16 @@ def _dispatch_issues(
             log.bind(repo=repo, issue=issue.number).info("Issue is on human hold; skipping")
             continue
         if store.has_active_run(db_path, repo, issue.number):
+            continue
+        unfinished = _open_blockers(config, issue.number, token, blocker_cache)
+        if unfinished is None:
+            continue
+        if unfinished:
+            log.bind(
+                repo=repo,
+                issue=issue.number,
+                blockers=[blocker.number for blocker in unfinished],
+            ).info("Issue is blocked by open dependencies; skipping")
             continue
         if not _claim_issue(config, issue, token):
             continue

@@ -60,6 +60,25 @@ class Issue:
             state=str(data.get("state") or "open").upper(),
         )
 
+    @classmethod
+    def from_github_api(cls, data: dict[str, Any]) -> Issue:
+        """Build an issue from a GitHub REST API response."""
+        author = data.get("user") or {}
+        labels = tuple(
+            label["name"]
+            for label in data.get("labels", [])
+            if isinstance(label, dict) and label.get("name")
+        )
+        return cls(
+            number=int(data["number"]),
+            title=str(data["title"]),
+            body=str(data.get("body") or ""),
+            url=str(data.get("html_url") or ""),
+            author=str(author.get("login") or ""),
+            labels=labels,
+            state=str(data.get("state") or "open").upper(),
+        )
+
 
 @dataclass(frozen=True)
 class CheckResult:

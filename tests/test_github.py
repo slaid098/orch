@@ -862,3 +862,165 @@ def test_merge_pr_keeps_merge_when_commit_lookup_fails(
 def test_merge_pr_rejects_invalid_url(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(github.GitHubError, match="number"):
         github.merge_pr("slaid098/orch", "https://example.test/pull/", "token")
+
+
+def _blocker_payload(number: int, *, state: str = "open") -> dict[str, object]:
+    return {
+        "number": number,
+        "title": f"Issue {number}",
+        "body": "Body",
+        "html_url": f"https://example.test/{number}",
+        "user": {"login": "slaid098"},
+        "labels": [{"name": "agent:queued"}],
+        "state": state,
+    }
+
+
+def test_list_blockers_maps_fields_and_deduplicates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+    payload = [
+        _blocker_payload(3, state="closed"),
+        _blocker_payload(4),
+        _blocker_payload(3, state="closed"),
+    ]
+    monkeypatch.setattr(
+        github,
+        "_run_gh",
+        lambda args, _token: calls.append(args) or json.dumps(payload),
+    )
+
+    blockers = github.list_blockers("slaid098/orch", 7, "token")
+
+    assert [blocker.number for blocker in blockers] == [3, 4]
+    assert blockers[0].state == "CLOSED"
+    assert blockers[1].state == "OPEN"
+    assert blockers[0].author == "slaid098"
+    assert blockers[0].url == "https://example.test/3"
+    assert blockers[0].labels == ("agent:queued",)
+    assert calls[0] == [
+        "api",
+        "repos/slaid098/orch/issues/7/dependencies/blocked_by?per_page=100&page=1",
+    ]
+
+
+def test_list_blockers_paginates(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[list[str]] = []
+    first_page = [_blocker_payload(number) for number in range(100)]
+    second_page = [_blocker_payload(100, state="closed")]
+
+    def run(args: list[str], _token: str) -> str:
+        calls.append(args)
+        return json.dumps(first_page if len(calls) == 1 else second_page)
+
+    monkeypatch.setattr(github, "_run_gh", run)
+
+    blockers = github.list_blockers("slaid098/orch", 7, "token")
+
+    assert len(blockers) == 101
+    assert blockers[-1].state == "CLOSED"
+    assert calls[0][1].endswith("page=1")
+    assert calls[1][1].endswith("page=2")
+
+
+def test_list_blockers_treats_a_404_as_no_dependencies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail(*_args: object, **_kwargs: object) -> str:
+        raise github.GitHubError("gh: Not Found (HTTP 404)")
+
+    monkeypatch.setattr(github, "_run_gh", fail)
+
+    assert github.list_blockers("slaid098/orch", 7, "token") == []
+
+
+def test_list_blockers_treats_a_plain_not_found_error_as_a_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail(*_args: object, **_kwargs: object) -> str:
+        raise github.GitHubError("Not Found")
+
+    monkeypatch.setattr(github, "_run_gh", fail)
+
+    with pytest.raises(github.GitHubError, match="Not Found"):
+        github.list_blockers("slaid098/orch", 7, "token")
+
+
+def test_list_blockers_fails_closed_when_a_network_error_mentions_404(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail(*_args: object, **_kwargs: object) -> str:
+        raise github.GitHubError("Tunnel connection failed: 404 Not Found")
+
+    monkeypatch.setattr(github, "_run_gh", fail)
+
+    with pytest.raises(github.GitHubError, match="Tunnel"):
+        github.list_blockers("slaid098/orch", 7, "token")
+
+
+def test_list_blockers_reraises_other_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail(*_args: object, **_kwargs: object) -> str:
+        raise github.GitHubError("boom")
+
+    monkeypatch.setattr(github, "_run_gh", fail)
+
+    with pytest.raises(github.GitHubError, match="boom"):
+        github.list_blockers("slaid098/orch", 7, "token")
+
+
+def test_list_blockers_fails_when_a_later_page_disappears(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first_page = [_blocker_payload(number) for number in range(100)]
+
+    def run(args: list[str], _token: str) -> str:
+        if args[1].endswith("page=1"):
+            return json.dumps(first_page)
+        raise github.GitHubError("gh: Not Found (HTTP 404)")
+
+    monkeypatch.setattr(github, "_run_gh", run)
+
+    with pytest.raises(github.GitHubError, match="404"):
+        github.list_blockers("slaid098/orch", 7, "token")
+
+
+def test_list_blockers_accepts_empty_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(github, "_run_gh", lambda *_args, **_kwargs: "")
+
+    assert github.list_blockers("slaid098/orch", 7, "token") == []
+
+
+def test_list_blockers_rejects_invalid_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(github, "_run_gh", lambda *_args, **_kwargs: "{")
+
+    with pytest.raises(github.GitHubError, match="dependencies"):
+        github.list_blockers("slaid098/orch", 7, "token")
+
+
+def test_list_blockers_rejects_a_non_list_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(github, "_run_gh", lambda *_args, **_kwargs: "{}")
+
+    with pytest.raises(github.GitHubError, match="dependencies"):
+        github.list_blockers("slaid098/orch", 7, "token")
+
+
+def test_list_blockers_rejects_an_invalid_item(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        github,
+        "_run_gh",
+        lambda *_args, **_kwargs: json.dumps([{"title": "missing a number"}]),
+    )
+
+    with pytest.raises(github.GitHubError, match="Could not parse"):
+        github.list_blockers("slaid098/orch", 7, "token")
