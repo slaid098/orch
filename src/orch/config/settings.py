@@ -6,6 +6,7 @@ import ipaddress
 import json
 import os
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -40,20 +41,62 @@ class _RuntimeSettings(BaseSettings):
     forgejo_token: str | None = None
 
 
+_GLOBAL_KEYS = (
+    "data_dir",
+    "skills_dir",
+    "poll_interval_seconds",
+    "max_workers",
+    "retention_days",
+    "workspace_retention_days",
+    "min_free_disk_gb",
+    "telegram",
+)
+
+
 def load_config(path: Path | None = None) -> Config:
-    """Load and validate an ``orch.yaml`` file.
+    """Load the first project from an ``orch.yaml`` file.
+
+    Use :func:`load_projects` when the file may define a ``projects`` list.
 
     Args:
         path: Optional configuration path. Defaults to ``orch.yaml`` in the
             current working directory.
 
     Returns:
-        Parsed and validated configuration.
+        Parsed and validated configuration for the first project.
 
     Raises:
         ConfigError: If the file is missing or contains invalid values.
     """
+    return load_projects(path)[0]
+
+
+def load_projects(path: Path | None = None) -> tuple[Config, ...]:
+    """Load and validate every project in an ``orch.yaml`` file.
+
+    A legacy file without a ``projects`` key produces one configuration.
+    Otherwise top-level sections are shared defaults and each ``projects``
+    entry overrides them; global settings such as ``data_dir`` and Telegram
+    stay at the top level.
+
+    Args:
+        path: Optional configuration path. Defaults to ``orch.yaml`` in the
+            current working directory.
+
+    Returns:
+        One configuration per project, in file order.
+
+    Raises:
+        ConfigError: If the file is missing, malformed, or defines duplicate
+            project names or repositories.
+    """
     config_path = (path or Path("orch.yaml")).expanduser().resolve()
+    raw = _read_config(config_path)
+    return _parse_projects(raw, config_path.parent, _RuntimeSettings())
+
+
+def _read_config(config_path: Path) -> dict[str, Any]:
+    """Read the YAML root mapping or raise a configuration error."""
     try:
         raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     except FileNotFoundError as ex:
@@ -69,63 +112,152 @@ def load_config(path: Path | None = None) -> Config:
     else:
         if not isinstance(raw, dict):
             raise ConfigError("Configuration root must be a mapping")
-        return _parse_config(raw, config_path.parent, _RuntimeSettings())
+        return raw
+
+
+def _parse_projects(
+    raw: dict[str, Any],
+    base_dir: Path,
+    settings: _RuntimeSettings,
+) -> tuple[Config, ...]:
+    """Build one configuration per project, applying shared defaults."""
+    projects_raw = raw.get("projects")
+    if projects_raw is None:
+        return (_parse_config(raw, raw, base_dir, settings),)
+    if not isinstance(projects_raw, list) or not projects_raw:
+        raise ConfigError("projects must be a non-empty list")
+    if "repo" in raw:
+        raise ConfigError("repo must be defined inside each projects entry")
+
+    defaults = {key: value for key, value in raw.items() if key != "projects"}
+    configs: list[Config] = []
+    names: set[str] = set()
+    repositories: set[str] = set()
+    for index, value in enumerate(projects_raw, start=1):
+        project = _mapping(value, f"projects[{index}]")
+        _reject_global_overrides(project, index)
+        if "repo" not in project:
+            raise ConfigError(f"projects[{index}].repo is required")
+        name = project.get("name")
+        if name is not None and (not isinstance(name, str) or not name.strip()):
+            raise ConfigError(f"projects[{index}].name must be a non-empty string")
+        overrides = {key: item for key, item in project.items() if key != "name"}
+        merged = _deep_merge(defaults, overrides)
+        config = _parse_config(
+            merged,
+            defaults,
+            base_dir,
+            settings,
+            name=name.strip() if isinstance(name, str) else None,
+        )
+        if config.name in names:
+            raise ConfigError(f"Duplicate project name: {config.name!r}")
+        if config.repo.full_name in repositories:
+            raise ConfigError(f"Duplicate project repository: {config.repo.full_name!r}")
+        names.add(config.name)
+        repositories.add(config.repo.full_name)
+        configs.append(config)
+    return tuple(configs)
+
+
+def _reject_global_overrides(project: dict[str, Any], index: int) -> None:
+    """Reject per-project overrides for settings shared by the daemon."""
+    for key in _GLOBAL_KEYS:
+        if key in project:
+            raise ConfigError(
+                f"projects[{index}].{key} is a global setting; define it at the top level"
+            )
+
+
+def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    """Merge nested mappings, replacing lists and scalar values."""
+    merged = dict(base)
+    for key, value in override.items():
+        current = merged.get(key)
+        if isinstance(current, dict) and isinstance(value, dict):
+            merged[key] = _deep_merge(current, value)
+        else:
+            merged[key] = value
+    return merged
 
 
 def _parse_config(
     raw: dict[str, Any],
+    global_raw: dict[str, Any],
     base_dir: Path,
     settings: _RuntimeSettings,
+    *,
+    name: str | None = None,
 ) -> Config:
     repo = _parse_repo(raw, base_dir)
     labels = _parse_labels(raw)
     worker = _parse_worker(raw)
-    telegram = _parse_telegram(raw, base_dir)
-    feedback = _parse_feedback(raw, repo)
-    watchdog = _parse_watchdog(raw)
-    checks = _parse_checks(raw)
-    reviewer = _parse_reviewer(raw)
-    mcp = _parse_mcp(raw)
-    data_dir = _resolve_path(str(raw.get("data_dir") or _default_data_dir()), base_dir)
-    skills_dir = _resolve_path(str(raw.get("skills_dir") or "skills"), base_dir)
-    poll_interval_seconds = _positive_int(
-        raw.get("poll_interval_seconds", 30), "poll_interval_seconds"
-    )
-    max_workers = _bounded_int(raw.get("max_workers", 2), "max_workers", minimum=1, maximum=3)
-    retention_days = _bounded_int(
-        raw.get("retention_days", 7), "retention_days", minimum=1, maximum=365
-    )
-    workspace_retention_days = _bounded_int(
-        raw.get("workspace_retention_days", 14),
-        "workspace_retention_days",
-        minimum=1,
-        maximum=365,
-    )
-    min_free_disk_gb = _bounded_int(
-        raw.get("min_free_disk_gb", 5),
-        "min_free_disk_gb",
-        minimum=1,
-        maximum=1000,
-    )
+    shared = _parse_globals(global_raw, base_dir)
     return Config(
         repo=repo,
         labels=labels,
         worker=worker,
-        data_dir=data_dir,
-        skills_dir=skills_dir,
-        poll_interval_seconds=poll_interval_seconds,
-        max_workers=max_workers,
-        retention_days=retention_days,
-        workspace_retention_days=workspace_retention_days,
-        min_free_disk_gb=min_free_disk_gb,
+        data_dir=shared.data_dir,
+        name=name or repo.name,
+        skills_dir=shared.skills_dir,
+        poll_interval_seconds=shared.poll_interval_seconds,
+        max_workers=shared.max_workers,
+        retention_days=shared.retention_days,
+        workspace_retention_days=shared.workspace_retention_days,
+        min_free_disk_gb=shared.min_free_disk_gb,
         gh_token=_resolve_token(settings),
         forgejo_token=_resolve_forgejo_token(settings),
-        telegram=telegram,
-        feedback=feedback,
-        watchdog=watchdog,
-        checks=checks,
-        reviewer=reviewer,
-        mcp=mcp,
+        telegram=shared.telegram,
+        feedback=_parse_feedback(raw, repo),
+        watchdog=_parse_watchdog(raw),
+        checks=_parse_checks(raw),
+        reviewer=_parse_reviewer(raw),
+        mcp=_parse_mcp(raw),
+    )
+
+
+@dataclass(frozen=True)
+class _GlobalSettings:
+    """Settings shared by every project in one daemon."""
+
+    data_dir: Path
+    skills_dir: Path
+    poll_interval_seconds: int
+    max_workers: int
+    retention_days: int
+    workspace_retention_days: int
+    min_free_disk_gb: int
+    telegram: TelegramConfig
+
+
+def _parse_globals(raw: dict[str, Any], base_dir: Path) -> _GlobalSettings:
+    """Parse top-level settings that cannot vary per project."""
+    return _GlobalSettings(
+        data_dir=_resolve_path(str(raw.get("data_dir") or _default_data_dir()), base_dir),
+        skills_dir=_resolve_path(str(raw.get("skills_dir") or "skills"), base_dir),
+        poll_interval_seconds=_positive_int(
+            raw.get("poll_interval_seconds", 30), "poll_interval_seconds"
+        ),
+        max_workers=_bounded_int(raw.get("max_workers", 2), "max_workers", minimum=1, maximum=3),
+        retention_days=_bounded_int(
+            raw.get("retention_days", 7),
+            "retention_days",
+            minimum=1,
+            maximum=365,
+        ),
+        workspace_retention_days=_bounded_int(
+            raw.get("workspace_retention_days", 14),
+            "workspace_retention_days",
+            minimum=1,
+            maximum=365,
+        ),
+        min_free_disk_gb=_bounded_int(
+            raw.get("min_free_disk_gb", 5),
+            "min_free_disk_gb",
+            minimum=1,
+            maximum=1000,
+        ),
+        telegram=_parse_telegram(raw, base_dir),
     )
 
 
@@ -162,9 +294,7 @@ def _validate_forgejo_url(url: str) -> None:
     """Validate the Forgejo base URL used for API and git access."""
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise ConfigError(
-            "repo.url must be an http(s) URL when repo.forge is 'forgejo'"
-        )
+        raise ConfigError("repo.url must be an http(s) URL when repo.forge is 'forgejo'")
     if parsed.username or parsed.password:
         raise ConfigError("repo.url must not contain credentials")
     if parsed.query or parsed.fragment:

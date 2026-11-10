@@ -39,6 +39,18 @@ def _config(tmp_path: Path) -> Config:
     )
 
 
+def test_run_id_is_scoped_to_the_repository(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    other = Config(
+        repo=RepoConfig(owner="slaid098", name="antidetect-browser-mcp", path=tmp_path),
+        labels=LabelsConfig(),
+        worker=WorkerConfig(test_commands=("pytest",)),
+        data_dir=tmp_path / "data",
+    )
+
+    assert pipeline._new_run_id(config, 7) != pipeline._new_run_id(other, 7)
+
+
 def _issue() -> Issue:
     return Issue(
         number=9,
@@ -181,9 +193,7 @@ def test_retry_reuses_source_and_workspace_and_succeeds(
     assert len(sources) == 2
     assert sources[0] == sources[1]
     assert len(set(workspaces)) == 1
-    assert workspaces[0] == (
-        config.data_dir / "workspaces" / "slaid098__orch" / "issue-9"
-    )
+    assert workspaces[0] == (config.data_dir / "workspaces" / "slaid098__orch" / "issue-9")
     assert attempts == [1, 2]
     assert previous_errors == [None, "first attempt broke"]
     assert cleaned_sources == [sources[0]]

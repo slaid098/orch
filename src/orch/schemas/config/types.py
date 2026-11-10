@@ -135,6 +135,7 @@ class Config:
     labels: LabelsConfig
     worker: WorkerConfig
     data_dir: Path
+    name: str = ""
     skills_dir: Path = field(default_factory=lambda: Path("skills"))
     poll_interval_seconds: int = 30
     max_workers: int = 2

@@ -8,6 +8,30 @@ repo:
   forge: github
   # url: https://git.slaid098.dev
 
+# To serve several repositories from one daemon, remove the top-level repo
+# block and add a projects list. Top-level labels/worker/checks/reviewer/mcp/
+# feedback/watchdog are shared defaults; each project deep-merges its own
+# sections over them. data_dir, skills_dir, telegram, and the worker-pool and
+# retention settings stay global.
+#
+# projects:
+#   - name: orch
+#     repo:
+#       owner: slaid098
+#       name: orch
+#       path: D:/Python projects/orch
+#       forge: github
+#   - name: antidetect
+#     repo:
+#       owner: slaid098
+#       name: antidetect-browser-mcp
+#       path: D:/Python projects/antidetect-browser-mcp
+#       forge: forgejo
+#       url: https://git.slaid098.dev
+#     worker:
+#       test_commands:
+#         - uv run pytest -m "not live" -q
+
 labels:
   queued: agent:queued
   running: agent:running
@@ -31,7 +55,7 @@ worker:
   test_commands:
     - uv run pytest -q
 
-# GitHub checks are polled before the reviewer starts. A failed check returns
+# Forge checks are polled before the reviewer starts. A failed check returns
 # control to the worker; the reviewer never sees a red pull request.
 checks:
   timeout_minutes: 30
@@ -39,7 +63,7 @@ checks:
   discovery_seconds: 60
 
 # Two reviewers (quality and security) run in separate read-only containers.
-# They have no GitHub token; the internal network only reaches the model and
+# They have no forge token; the internal network only reaches the model and
 # Context7 through a narrow gateway. An empty findings array from both approves;
 # any finding blocks the merge and consumes one shared worker attempt.
 reviewer:

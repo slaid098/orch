@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import time
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -90,7 +91,7 @@ def run_issue(
         so a daemon worker can release its slot and continue.
     """
     started_at = time.monotonic()
-    run_id = _new_run_id(issue.number)
+    run_id = _new_run_id(config, issue.number)
     run_dir = _create_run_dir(config, issue, run_id)
     repo = config.repo.full_name
     timeout_seconds = attempt_timeout_seconds or config.worker.timeout_minutes * 60
@@ -286,10 +287,7 @@ def _workspace_problem(
     """Return why a persistent workspace cannot be safely reused, if anything."""
     state = gitops.workspace_state(workspace)
     if state is None:
-        return (
-            "Persistent workspace is missing or unreadable; a safe revision is "
-            "impossible"
-        )
+        return "Persistent workspace is missing or unreadable; a safe revision is impossible"
     actual_branch, head = state
     if actual_branch != branch:
         return (
@@ -1199,15 +1197,14 @@ def _run_worker_attempt(
     )
     validate_branch(worker.branch, issue.number)
     if worker.branch != branch:
-        raise StandardsError(
-            f"Worker returned branch {worker.branch!r}, expected {branch!r}"
-        )
+        raise StandardsError(f"Worker returned branch {worker.branch!r}, expected {branch!r}")
     return worker
 
 
-def _new_run_id(issue: int) -> str:
+def _new_run_id(config: Config, issue: int) -> str:
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ").lower()
-    return f"{stamp}-{issue}"
+    repo_hash = hashlib.sha1(config.repo.full_name.encode("utf-8")).hexdigest()[:8]
+    return f"{stamp}-{issue}-{repo_hash}"
 
 
 def _create_run_dir(config: Config, issue: Issue, run_id: str) -> Path:

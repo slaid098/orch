@@ -89,9 +89,7 @@ def test_initialize_resolves_token_and_labels(
     monkeypatch.setattr(
         daemon.forge,
         "ensure_labels",
-        lambda config, token, labels: calls.append(
-            ("labels", config.repo.full_name, labels)
-        ),
+        lambda config, token, labels: calls.append(("labels", config.repo.full_name, labels)),
     )
     monkeypatch.setattr(
         daemon.store,
@@ -315,9 +313,7 @@ def test_reap_finished_prunes_workspaces_and_skips_active_issues(
     monkeypatch.setattr(
         daemon,
         "prune_workspaces",
-        lambda cfg, token, *, active_issues: calls.append(
-            (cfg, token, set(active_issues))
-        ),
+        lambda cfg, token, *, active_issues: calls.append((cfg, token, set(active_issues))),
     )
 
     daemon._reap_finished(active, config, "token")
@@ -663,3 +659,127 @@ def test_dispatch_issues_skips_human_hold(
     )
 
     assert claimed == []
+
+
+def _second_config(config: Config) -> Config:
+    return replace(
+        config,
+        name="other",
+        repo=replace(config.repo, name="other"),
+    )
+
+
+def test_run_daemon_polls_every_project(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = replace(_config(tmp_path), max_workers=2)
+    second = _second_config(config)
+    reconciled: list[str] = []
+    monkeypatch.setattr(
+        daemon,
+        "_reconcile_startup",
+        lambda project, _token: reconciled.append(project.repo.full_name),
+    )
+    monkeypatch.setattr(
+        daemon.forge,
+        "list_ready_issues",
+        lambda *_args: [_issue(7)],
+    )
+    monkeypatch.setattr(daemon.store, "has_active_run", lambda *_args: False)
+    monkeypatch.setattr(daemon, "_claim_issue", lambda *_args: True)
+    executor = FakeExecutor()
+    monkeypatch.setattr(daemon, "ThreadPoolExecutor", lambda **_kwargs: executor)
+
+    def interrupt(_seconds: int) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(daemon.time, "sleep", interrupt)
+
+    tokens = {"slaid098/orch": "one", "slaid098/other": "two"}
+
+    assert daemon.run_daemon((config, second), tokens) == 0
+    assert reconciled == ["slaid098/orch", "slaid098/other"]
+    assert [call[1][0].repo.full_name for call in executor.submitted] == [
+        "slaid098/orch",
+        "slaid098/other",
+    ]
+    assert [call[1][2] for call in executor.submitted] == ["one", "two"]
+
+
+def test_run_daemon_shares_the_worker_pool_across_projects(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = replace(_config(tmp_path), max_workers=1)
+    second = _second_config(config)
+    monkeypatch.setattr(daemon, "_reconcile_startup", lambda *_args: None)
+    monkeypatch.setattr(
+        daemon.forge,
+        "list_ready_issues",
+        lambda *_args: [_issue(7)],
+    )
+    monkeypatch.setattr(daemon.store, "has_active_run", lambda *_args: False)
+    monkeypatch.setattr(daemon, "_claim_issue", lambda *_args: True)
+    executor = FakeExecutor()
+    monkeypatch.setattr(daemon, "ThreadPoolExecutor", lambda **_kwargs: executor)
+
+    def interrupt(_seconds: int) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(daemon.time, "sleep", interrupt)
+
+    tokens = {"slaid098/orch": "one", "slaid098/other": "two"}
+
+    assert daemon.run_daemon((config, second), tokens) == 0
+    assert len(executor.submitted) == 1
+
+
+def test_reap_finished_routes_notifications_per_project(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    second = _second_config(config)
+    monkeypatch.setattr(daemon, "prune_runs", lambda *_args: None)
+    monkeypatch.setattr(daemon.store, "prune_old_runs", lambda *_args: None)
+    monkeypatch.setattr(daemon, "prune_workspaces", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(daemon, "_queue_size", lambda *_args: 0)
+    finished: list[tuple[str, int]] = []
+    monkeypatch.setattr(
+        daemon.notify,
+        "notify_finished",
+        lambda project, number, _title, **_kwargs: finished.append(
+            (project.repo.full_name, number)
+        ),
+    )
+    active = {
+        ("slaid098/orch", 7): FakeFuture(done=True, result=_outcome()),
+        ("slaid098/other", 8): FakeFuture(done=True, result=_outcome()),
+    }
+
+    daemon._reap_finished(
+        active,
+        (config, second),
+        {"slaid098/orch": "one", "slaid098/other": "two"},
+    )
+
+    assert finished == [("slaid098/orch", 7), ("slaid098/other", 8)]
+    assert active == {}
+
+
+def test_reap_finished_requires_a_token_for_every_project(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    second = _second_config(config)
+    monkeypatch.setattr(daemon, "prune_runs", lambda *_args: None)
+    monkeypatch.setattr(daemon.store, "prune_old_runs", lambda *_args: None)
+
+    with pytest.raises(ValueError, match="slaid098/other"):
+        daemon._reap_finished(
+            {},
+            (config, second),
+            {"slaid098/orch": "one"},
+        )
