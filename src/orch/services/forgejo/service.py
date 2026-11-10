@@ -190,6 +190,37 @@ def list_blockers(url: str, repo: str, number: int, token: str) -> list[Issue]:
     return list(blockers.values())
 
 
+def add_dependency(
+    url: str,
+    repo: str,
+    number: int,
+    blocker: int,
+    token: str,
+) -> None:
+    """Add a native "blocked by" edge to an issue.
+
+    Args:
+        url: Forgejo base URL.
+        repo: Repository in ``owner/name`` form.
+        number: Issue that becomes blocked.
+        blocker: Issue number that blocks it.
+        token: Forgejo API token.
+
+    Raises:
+        ForgejoError: If the repository name is malformed or the request
+            fails.
+    """
+    owner, name = _repo_owner_and_name(repo)
+    _request(
+        url,
+        token,
+        f"repos/{repo}/issues/{number}/dependencies",
+        method="POST",
+        payload={"index": blocker, "owner": owner, "repo": name},
+    )
+    log.info("Issue #{} is blocked by #{}", number, blocker)
+
+
 def issue_is_open(url: str, repo: str, number: int, token: str) -> bool:
     """Return whether an issue is still open."""
     data = _request(url, token, f"repos/{repo}/issues/{number}")
@@ -777,3 +808,11 @@ def _pr_number(pr_url: str) -> int:
     if not tail.isdigit():
         raise ForgejoError(f"Could not determine pull-request number from {pr_url!r}")
     return int(tail)
+
+
+def _repo_owner_and_name(repo: str) -> tuple[str, str]:
+    """Split ``owner/name`` into the parts a Forgejo issue reference needs."""
+    owner, separator, name = repo.partition("/")
+    if not separator or not owner or not name or "/" in name:
+        raise ForgejoError(f"Invalid repository name: {repo!r}")
+    return owner, name

@@ -1,6 +1,7 @@
 """Forgejo service entrypoints."""
 
 from orch.services.forgejo.service import (
+    add_dependency,
     check_repo,
     comment_bot_issue,
     comment_issue,
@@ -25,6 +26,7 @@ from orch.services.forgejo.service import (
 )
 
 __all__ = [
+    "add_dependency",
     "check_repo",
     "comment_bot_issue",
     "comment_issue",

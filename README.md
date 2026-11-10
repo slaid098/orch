@@ -397,6 +397,53 @@ on every poll, so a daemon restart picks up the current ones.
   -> runs on the next poll after #42 is CLOSED
 ```
 
+### Creating a dependency chain
+
+`scripts/create_issue.py` creates native "blocked by" edges with the repeatable
+`--blocked-by N` option. One call creates one issue, so a chain is a sequence
+of calls:
+
+```bash
+# A has no dependencies and is queued immediately.
+uv run python scripts/create_issue.py \
+  --title "feat(api): add the endpoint" --body-file a.md
+
+# B is created on agent:hold, linked to A, and then queued.
+uv run python scripts/create_issue.py \
+  --title "test(api): cover the endpoint" --body-file b.md --blocked-by 42
+
+# C waits for B.
+uv run python scripts/create_issue.py \
+  --title "docs(api): document the endpoint" --body-file c.md --blocked-by 43
+```
+
+`--blocked-by` accepts several values (`--blocked-by 42 --blocked-by 45`) and
+skips an edge that already exists. With `--blocked-by` and no explicit
+`--label`, the script creates the issue with `agent:hold`, links every blocker
+through the forge adapter, and only then replaces `agent:hold` with
+`agent:queued` in one label update. If reading the existing blockers, linking,
+or the label update fails, the issue stays on `agent:hold`, the URL is printed,
+and the script exits with code `1`; the daemon cannot claim it. The issue
+number is parsed from the created issue URL, and an unparsable URL also leaves
+the issue on hold with exit code `1`.
+
+An explicit `--label` disables the automatic transition: the script uses
+exactly those labels and still links the dependencies, but never queues the
+issue. `--label agent:hold` therefore creates a held issue with all edges in
+place. `--label agent:queued` together with `--blocked-by` is rejected with
+code `2`, because it would let the daemon claim the issue before the edges
+exist. `--validate-only` validates only the title and body, touches no network,
+and does not require `--blocked-by`.
+
+Limitations:
+
+- The script links dependencies only for the issue it is creating. An edge
+  between two existing issues — the first edge in a bootstrap setup, or a link
+  from an existing tracking issue — must be added manually through the forge
+  UI/API.
+- There is no cycle detection, and the CLI cannot remove or reorder edges.
+- Dependencies are same-repository only.
+
 ## Standards
 
 The issue title is the single source of truth for the work itself; branch
@@ -575,7 +622,5 @@ the volume has less space.
 
 ## Not yet included
 
-- Multi-repository support
 - Per-project worker quotas
-- Issue dependency edges (`blocked_by`)
 - Hermes triggers
