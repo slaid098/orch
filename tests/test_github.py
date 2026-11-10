@@ -1024,3 +1024,65 @@ def test_list_blockers_rejects_an_invalid_item(
 
     with pytest.raises(github.GitHubError, match="Could not parse"):
         github.list_blockers("slaid098/orch", 7, "token")
+
+
+def test_add_dependency_posts_the_blocker_database_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    def run(args: list[str], _token: str) -> str:
+        calls.append(args)
+        return "12345\n" if args[1].endswith("/issues/3") else ""
+
+    monkeypatch.setattr(github, "_run_gh", run)
+
+    github.add_dependency("slaid098/orch", 7, 3, "token")
+
+    assert calls[0] == ["api", "repos/slaid098/orch/issues/3", "--jq", ".id"]
+    assert calls[1] == [
+        "api",
+        "--method",
+        "POST",
+        "repos/slaid098/orch/issues/7/dependencies/blocked_by",
+        "-F",
+        "issue_id=12345",
+    ]
+
+
+def test_add_dependency_rejects_a_non_numeric_database_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(github, "_run_gh", lambda *_args, **_kwargs: "abc\n")
+
+    with pytest.raises(github.GitHubError, match="database id"):
+        github.add_dependency("slaid098/orch", 7, 3, "token")
+
+
+def test_add_dependency_propagates_a_lookup_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail(*_args: object, **_kwargs: object) -> str:
+        raise github.GitHubError("gh: Not Found (HTTP 404)")
+
+    monkeypatch.setattr(github, "_run_gh", fail)
+
+    with pytest.raises(github.GitHubError, match="404"):
+        github.add_dependency("slaid098/orch", 7, 3, "token")
+
+
+def test_add_dependency_propagates_a_link_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    def run(args: list[str], _token: str) -> str:
+        calls.append(args)
+        if len(calls) == 1:
+            return "12345\n"
+        raise github.GitHubError("gh: Validation Failed (HTTP 422)")
+
+    monkeypatch.setattr(github, "_run_gh", run)
+
+    with pytest.raises(github.GitHubError, match="422"):
+        github.add_dependency("slaid098/orch", 7, 3, "token")

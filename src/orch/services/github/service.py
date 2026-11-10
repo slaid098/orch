@@ -234,6 +234,57 @@ def list_blockers(repo: str, number: int, token: str) -> list[Issue]:
         page += 1
 
 
+def add_dependency(
+    repo: str,
+    number: int,
+    blocker: int,
+    token: str,
+) -> None:
+    """Add a native "blocked by" edge to an issue.
+
+    GitHub expects the blocker's database id in the request body, so the
+    repository-local issue number is resolved first.
+
+    Args:
+        repo: Repository in ``owner/name`` form.
+        number: Issue that becomes blocked.
+        blocker: Issue number that blocks it.
+        token: GitHub token.
+
+    Raises:
+        GitHubError: If the blocker lookup fails, its id cannot be parsed, or
+            the dependency request fails.
+    """
+    output = _run_gh(
+        ["api", f"repos/{repo}/issues/{blocker}", "--jq", ".id"],
+        token,
+    )
+    raw = output.strip()
+    try:
+        issue_id = int(raw)
+    except ValueError as ex:
+        log.bind(blocker=blocker, output=raw).error(
+            "Could not parse the database id of the blocking issue"
+        )
+        raise GitHubError(
+            f"Could not parse the database id of issue #{blocker}"
+        ) from ex
+    _run_gh(
+        [
+            "api",
+            "--method",
+            "POST",
+            f"repos/{repo}/issues/{number}/dependencies/blocked_by",
+            # ``-F`` sends a typed value; ``-f`` always sends a string and
+            # GitHub rejects it with 422 because ``issue_id`` must be an integer.
+            "-F",
+            f"issue_id={issue_id}",
+        ],
+        token,
+    )
+    log.info("Issue #{} is blocked by #{}", number, blocker)
+
+
 def edit_labels(
     repo: str,
     number: int,

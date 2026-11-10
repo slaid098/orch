@@ -1233,3 +1233,56 @@ def test_list_blockers_rejects_an_invalid_item(
 
     with pytest.raises(ForgejoError, match="Could not parse"):
         forgejo.list_blockers(_BASE, _REPO, 7, "token")
+
+
+def test_add_dependency_posts_the_issue_meta(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = _use(
+        monkeypatch,
+        {("POST", f"repos/{_REPO}/issues/7/dependencies"): {}},
+    )
+
+    forgejo.add_dependency(_BASE, _REPO, 7, 3, "token")
+
+    assert api.requests[0]["method"] == "POST"
+    assert api.requests[0]["body"] == {
+        "index": 3,
+        "owner": "slaid098",
+        "repo": "orch",
+    }
+    assert api.requests[0]["headers"]["Authorization"] == "token token"
+
+
+def test_add_dependency_surfaces_api_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _use(
+        monkeypatch,
+        {
+            ("POST", f"repos/{_REPO}/issues/7/dependencies"): _http_error(
+                422,
+                "cannot depend on itself",
+            )
+        },
+    )
+
+    with pytest.raises(ForgejoError, match="422"):
+        forgejo.add_dependency(_BASE, _REPO, 7, 7, "token")
+
+
+@pytest.mark.parametrize(
+    "repo",
+    ["orch", "slaid098/", "/orch", "slaid098/orch/extra"],
+)
+def test_add_dependency_rejects_an_invalid_repository(
+    monkeypatch: pytest.MonkeyPatch,
+    repo: str,
+) -> None:
+    def fail(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("the API must not be called")
+
+    monkeypatch.setattr(forgejo, "_request", fail)
+
+    with pytest.raises(ForgejoError, match="Invalid repository"):
+        forgejo.add_dependency(_BASE, repo, 7, 3, "token")
