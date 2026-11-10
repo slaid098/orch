@@ -178,6 +178,62 @@ def get_issue(repo: str, number: int, token: str) -> Issue:
         return Issue.from_json(data)
 
 
+def list_blockers(repo: str, number: int, token: str) -> list[Issue]:
+    """Return the issues that block the given issue.
+
+    A ``404`` response means that dependencies are unavailable or unset and
+    is treated as an empty list.
+
+    Args:
+        repo: Repository in ``owner/name`` form.
+        number: Issue whose blockers are requested.
+        token: GitHub token.
+
+    Returns:
+        Unique blocking issues in API order.
+
+    Raises:
+        GitHubError: If the request fails, the response is invalid, or an
+            issue cannot be mapped.
+    """
+    blockers: dict[int, Issue] = {}
+    page = 1
+    while True:
+        path = (
+            f"repos/{repo}/issues/{number}/dependencies/blocked_by"
+            f"?per_page=100&page={page}"
+        )
+        try:
+            output = _run_gh(["api", path], token)
+        except GitHubError as ex:
+            if page == 1 and _is_not_found(ex):
+                return []
+            raise
+        try:
+            data = json.loads(output or "[]")
+        except json.JSONDecodeError as ex:
+            log.bind(error=ex, error_type=type(ex).__name__).error(
+                "Could not parse gh api dependencies output"
+            )
+            raise GitHubError("Could not parse issue dependencies") from ex
+        if not isinstance(data, list):
+            raise GitHubError("Could not parse issue dependencies")
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            try:
+                issue = Issue.from_github_api(item)
+            except (KeyError, TypeError, ValueError) as ex:
+                log.bind(error=ex, error_type=type(ex).__name__).error(
+                    "Could not parse a GitHub issue dependency"
+                )
+                raise GitHubError("Could not parse a GitHub issue dependency") from ex
+            blockers.setdefault(issue.number, issue)
+        if len(data) < 100:
+            return list(blockers.values())
+        page += 1
+
+
 def edit_labels(
     repo: str,
     number: int,
@@ -606,6 +662,16 @@ def create_pr(
         raise GitHubError("gh pr create returned no pull request URL")
     log.info("Created pull request: {}", url)
     return url
+
+
+def _is_not_found(ex: GitHubError) -> bool:
+    """Return whether a gh failure is a confirmed HTTP 404 response.
+
+    ``gh`` renders an API error as ``gh: <reason> (HTTP <code>)``. Matching
+    that marker avoids treating proxy or network failures that merely mention
+    ``404`` or ``not found`` as an absent dependency endpoint.
+    """
+    return re.search(r"\bHTTP 404\b", str(ex)) is not None
 
 
 def _run_gh(

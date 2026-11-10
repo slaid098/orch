@@ -370,6 +370,33 @@ Use this checklist for the first controlled run against a real issue. Complete
 - `agent:pr-open` — orch opened a pull request.
 - `agent:needs-human` — the issue needs manual intervention.
 
+## Issue dependencies
+
+Both forges are read through their native "blocked by" relations. Before an
+issue is claimed, orch asks the forge which issues block it. The rule is
+**closed means ready**: an issue starts only when every blocker is `CLOSED`.
+The merge status of a blocking pull request is not checked separately.
+
+The dependency check runs immediately before dispatch and again in `run_once`;
+it does not change the order or the `max_workers` parallelism of independent
+issues. An open or unknown blocker leaves `agent:queued` in place, so the issue
+is reconsidered on the next poll. A failed lookup is fail-closed: orch logs the
+error and does not start the issue until a later poll succeeds. A `404` from
+the dependency endpoint means that dependencies are unsupported or absent and
+is treated as an empty list.
+
+Orch stores no dependency state locally; the relations are read from the forge
+on every poll, so a daemon restart picks up the current ones.
+
+```text
+#42 feat(api): add the endpoint    agent:queued, no blockers
+  -> runs immediately
+
+#43 test(api): cover the endpoint    blocked by #42
+  -> waits while #42 is OPEN
+  -> runs on the next poll after #42 is CLOSED
+```
+
 ## Standards
 
 The issue title is the single source of truth for the work itself; branch

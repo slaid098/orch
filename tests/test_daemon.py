@@ -46,6 +46,16 @@ def _outcome(status: str = "pr_open") -> RunOutcome:
     )
 
 
+def _blocker(number: int, state: str = "OPEN") -> Issue:
+    return replace(_issue(number), state=state)
+
+
+@pytest.fixture(autouse=True)
+def _no_issue_blockers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep dependency lookups offline unless a test overrides them."""
+    monkeypatch.setattr(daemon.forge, "list_blockers", lambda *_args: [])
+
+
 class FakeLogger:
     def __init__(self) -> None:
         self.removed = 0
@@ -636,6 +646,62 @@ def test_run_once_refuses_human_hold(
     assert daemon.run_once(config, "token", 7) == 1
 
 
+def test_run_once_refuses_a_blocked_issue(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    monkeypatch.setattr(daemon.forge, "get_issue", lambda *_args: _issue())
+    monkeypatch.setattr(
+        daemon.forge,
+        "list_blockers",
+        lambda *_args: [_blocker(3)],
+    )
+    monkeypatch.setattr(
+        daemon,
+        "run_issue",
+        lambda *_args, **_kwargs: pytest.fail("blocked issue must not run"),
+    )
+
+    assert daemon.run_once(config, "token", 7) == 1
+
+
+def test_run_once_refuses_when_blockers_cannot_be_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    monkeypatch.setattr(daemon.forge, "get_issue", lambda *_args: _issue())
+
+    def fail(*_args: object) -> list[Issue]:
+        raise ForgeError("offline")
+
+    monkeypatch.setattr(daemon.forge, "list_blockers", fail)
+    monkeypatch.setattr(
+        daemon,
+        "run_issue",
+        lambda *_args, **_kwargs: pytest.fail("blocked issue must not run"),
+    )
+
+    assert daemon.run_once(config, "token", 7) == 1
+
+
+def test_run_once_runs_when_all_blockers_are_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    monkeypatch.setattr(daemon.forge, "get_issue", lambda *_args: _issue())
+    monkeypatch.setattr(
+        daemon.forge,
+        "list_blockers",
+        lambda *_args: [_blocker(3, "CLOSED")],
+    )
+    monkeypatch.setattr(daemon, "run_issue", lambda *_args, **_kwargs: _outcome())
+
+    assert daemon.run_once(config, "token", 7) == 0
+
+
 def test_dispatch_issues_skips_human_hold(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -659,6 +725,155 @@ def test_dispatch_issues_skips_human_hold(
     )
 
     assert claimed == []
+
+
+def test_dispatch_issues_skips_an_issue_with_an_open_blocker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    claimed: list[int] = []
+    monkeypatch.setattr(
+        daemon.forge,
+        "list_blockers",
+        lambda *_args: [_blocker(3)],
+    )
+    monkeypatch.setattr(daemon.store, "has_active_run", lambda *_args: False)
+    monkeypatch.setattr(
+        daemon,
+        "_claim_issue",
+        lambda _config, issue, _token: claimed.append(issue.number) or True,
+    )
+
+    daemon._dispatch_issues(
+        [_issue(7)],
+        {},
+        config,
+        "token",
+        tmp_path / "orch.db",
+        object(),  # type: ignore[arg-type]
+    )
+
+    assert claimed == []
+
+
+def test_dispatch_issues_treats_an_unknown_blocker_state_as_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    claimed: list[int] = []
+    monkeypatch.setattr(
+        daemon.forge,
+        "list_blockers",
+        lambda *_args: [_blocker(3, state="")],
+    )
+    monkeypatch.setattr(daemon.store, "has_active_run", lambda *_args: False)
+    monkeypatch.setattr(
+        daemon,
+        "_claim_issue",
+        lambda _config, issue, _token: claimed.append(issue.number) or True,
+    )
+
+    daemon._dispatch_issues(
+        [_issue(7)],
+        {},
+        config,
+        "token",
+        tmp_path / "orch.db",
+        object(),  # type: ignore[arg-type]
+    )
+
+    assert claimed == []
+
+
+def test_dispatch_issues_claims_when_all_blockers_are_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    claimed: list[int] = []
+    monkeypatch.setattr(
+        daemon.forge,
+        "list_blockers",
+        lambda *_args: [_blocker(3, "CLOSED"), _blocker(4, "closed")],
+    )
+    monkeypatch.setattr(daemon.store, "has_active_run", lambda *_args: False)
+    monkeypatch.setattr(
+        daemon,
+        "_claim_issue",
+        lambda _config, issue, _token: claimed.append(issue.number) or True,
+    )
+    executor = FakeExecutor()
+
+    daemon._dispatch_issues(
+        [_issue(7)],
+        {},
+        config,
+        "token",
+        tmp_path / "orch.db",
+        executor,  # type: ignore[arg-type]
+    )
+
+    assert claimed == [7]
+    assert len(executor.submitted) == 1
+
+
+def test_dispatch_issues_skips_when_blockers_cannot_be_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    claimed: list[int] = []
+
+    def fail(*_args: object) -> list[Issue]:
+        raise ForgeError("offline")
+
+    monkeypatch.setattr(daemon.forge, "list_blockers", fail)
+    monkeypatch.setattr(daemon.store, "has_active_run", lambda *_args: False)
+    monkeypatch.setattr(
+        daemon,
+        "_claim_issue",
+        lambda _config, issue, _token: claimed.append(issue.number) or True,
+    )
+
+    daemon._dispatch_issues(
+        [_issue(7)],
+        {},
+        config,
+        "token",
+        tmp_path / "orch.db",
+        object(),  # type: ignore[arg-type]
+    )
+
+    assert claimed == []
+
+
+def test_dispatch_issues_caches_blockers_per_issue(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    calls: list[int] = []
+
+    def blockers(_config: Config, number: int, _token: str) -> list[Issue]:
+        calls.append(number)
+        return []
+
+    monkeypatch.setattr(daemon.forge, "list_blockers", blockers)
+    monkeypatch.setattr(daemon.store, "has_active_run", lambda *_args: False)
+    monkeypatch.setattr(daemon, "_claim_issue", lambda *_args: False)
+
+    daemon._dispatch_issues(
+        [_issue(7), _issue(7)],
+        {},
+        config,
+        "token",
+        tmp_path / "orch.db",
+        object(),  # type: ignore[arg-type]
+    )
+
+    assert calls == [7]
 
 
 def _second_config(config: Config) -> Config:

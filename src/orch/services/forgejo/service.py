@@ -156,6 +156,40 @@ def get_issue(url: str, repo: str, number: int, token: str) -> Issue:
     return Issue.from_forgejo(_mapping(data, "issue"))
 
 
+def list_blockers(url: str, repo: str, number: int, token: str) -> list[Issue]:
+    """Return the issues that block the given issue.
+
+    A ``404`` response means that dependencies are unavailable or unset and
+    is treated as an empty list.
+
+    Args:
+        url: Forgejo base URL.
+        repo: Repository in ``owner/name`` form.
+        number: Issue whose blockers are requested.
+        token: Forgejo API token.
+
+    Returns:
+        Unique blocking issues in forge order.
+
+    Raises:
+        ForgejoError: If the request fails, the response is invalid, or an
+            issue cannot be mapped.
+    """
+    path = f"repos/{repo}/issues/{number}/dependencies"
+    items = _paged(url, token, path, missing_ok=True)
+    blockers: dict[int, Issue] = {}
+    for item in items:
+        try:
+            issue = Issue.from_forgejo(item)
+        except (KeyError, TypeError, ValueError) as ex:
+            log.bind(error=ex, error_type=type(ex).__name__).error(
+                "Could not parse a Forgejo issue dependency"
+            )
+            raise ForgejoError("Could not parse a Forgejo issue dependency") from ex
+        blockers.setdefault(issue.number, issue)
+    return list(blockers.values())
+
+
 def issue_is_open(url: str, repo: str, number: int, token: str) -> bool:
     """Return whether an issue is still open."""
     data = _request(url, token, f"repos/{repo}/issues/{number}")
@@ -608,22 +642,50 @@ def _repo_labels(url: str, repo: str, token: str) -> dict[str, int]:
     return result
 
 
-def _paged(url: str, token: str, path: str) -> list[dict[str, Any]]:
+def _paged(
+    url: str,
+    token: str,
+    path: str,
+    *,
+    missing_ok: bool = False,
+) -> list[dict[str, Any]]:
+    """Return every page of a Forgejo list endpoint.
+
+    When ``missing_ok`` is true, a 404 on the first page means that the
+    endpoint does not exist and yields an empty list. A 404 on a later page
+    still fails because data was already returned.
+    """
     items: list[dict[str, Any]] = []
     page = 1
     separator = "&" if "?" in path else "?"
     while True:
-        data = _request(
-            url,
-            token,
-            f"{path}{separator}limit={_PAGE_SIZE}&page={page}",
-        )
+        try:
+            data = _request(
+                url,
+                token,
+                f"{path}{separator}limit={_PAGE_SIZE}&page={page}",
+            )
+        except ForgejoError as ex:
+            if missing_ok and page == 1 and _is_not_found(ex):
+                return []
+            raise
         if not isinstance(data, list):
             raise ForgejoError(f"Could not parse Forgejo list response for {path}")
         items.extend(item for item in data if isinstance(item, dict))
         if len(data) < _PAGE_SIZE:
             return items
         page += 1
+
+
+def _is_not_found(ex: ForgejoError) -> bool:
+    """Return whether an API error is a confirmed HTTP 404 response.
+
+    Only an ``HTTPError`` chained by ``_request`` counts. A network failure
+    whose message happens to mention ``404`` must stay a read failure so that
+    the dependency gate fails closed.
+    """
+    cause = ex.__cause__
+    return isinstance(cause, HTTPError) and cause.code == 404
 
 
 def _request(
