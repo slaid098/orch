@@ -397,6 +397,47 @@ on every poll, so a daemon restart picks up the current ones.
   -> runs on the next poll after #42 is CLOSED
 ```
 
+### Forge support and limitations
+
+Each project reads dependencies from its own forge through the native
+"blocked by" relation, so a daemon serving both GitHub and Forgejo
+repositories uses the endpoint of the project's forge for every issue in that
+project:
+
+- **Forgejo** — `GET` on
+  `/repos/{owner}/{repo}/issues/{index}/dependencies`, which returns
+  `IssueListWithoutPagination`.
+- **GitHub** — `GET` on
+  `/repos/{owner}/{repo}/issues/{issue_number}/dependencies/blocked_by`.
+
+Linking differs as well. Forgejo accepts the blocker's issue number as
+`index` together with `owner` and `repo`. GitHub expects the blocker's
+database id, not its issue number: orch resolves it with
+`GET /repos/{owner}/{repo}/issues/{blocker}` and sends it as `issue_id` to
+`POST /repos/{owner}/{repo}/issues/{number}/dependencies/blocked_by`.
+
+Sub-issues are not involved. Forgejo `16.0.2` and `17.0.1` do not support
+native sub-issues, so execution order is expressed only through `blocked by`
+edges; orch does not emulate sub-issues. Forgejo `16.0.2` is EOL;
+dependencies work on it, and choosing an upgrade is a separate operational
+decision rather than a requirement of this feature.
+
+A `404` from either read endpoint means "no dependencies or feature
+unavailable" and is treated as an empty list, so a Forgejo instance without
+the dependencies API behaves as if every issue has no blockers. A `404` on a
+later page is still a read failure. Any other lookup error is fail-closed:
+the issue is not started and is retried on a later poll.
+
+- A blocking pull request is checked by its `state`, not by its merge status:
+  an open pull request blocks, while a closed one does not, merged or not.
+- A deleted blocker is no longer returned by the forge, so its edge
+  disappears and it does not block.
+- A blocker with a missing or unknown `state` is not `CLOSED` and therefore
+  blocks.
+
+Limitations: dependencies are same-repository only, cycles are not detected,
+and the CLI cannot remove or reorder edges.
+
 ### Creating a dependency chain
 
 `scripts/create_issue.py` creates native "blocked by" edges with the repeatable
