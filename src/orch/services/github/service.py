@@ -1,4 +1,4 @@
-"""Thin GitHub CLI client used by the orchestrator."""
+"""GitHub CLI client used by the orchestrator."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from typing import Any
 from urllib.parse import quote
 
 from orch.config.logger import get_logger
-from orch.constants.standards import PR_ISSUE_MARKER
+from orch.constants.standards import BOT_MARKER, PR_ISSUE_MARKER
 from orch.exceptions.github import GitHubError
 from orch.schemas.github.types import (
     CheckResult,
@@ -22,8 +22,6 @@ from orch.schemas.github.types import (
 )
 
 log = get_logger(component="github")
-
-BOT_MARKER = "<!-- orch:bot -->"
 
 
 def resolve_token(owner: str, configured: str | None) -> str:

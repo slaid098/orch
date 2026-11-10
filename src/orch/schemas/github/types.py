@@ -8,7 +8,7 @@ from typing import Any
 
 @dataclass(frozen=True)
 class Issue:
-    """A GitHub issue reduced to the fields used by the pipeline."""
+    """A forge issue reduced to the fields used by the pipeline."""
 
     number: int
     title: str
@@ -39,6 +39,25 @@ class Issue:
             author=str(author.get("login") or ""),
             labels=labels,
             state=str(data.get("state") or "OPEN").upper(),
+        )
+
+    @classmethod
+    def from_forgejo(cls, data: dict[str, Any]) -> Issue:
+        """Build an issue from a Forgejo API response."""
+        author = data.get("user") or {}
+        labels = tuple(
+            label["name"]
+            for label in data.get("labels", [])
+            if isinstance(label, dict) and label.get("name")
+        )
+        return cls(
+            number=int(data["number"]),
+            title=str(data["title"]),
+            body=str(data.get("body") or ""),
+            url=str(data.get("html_url") or data.get("url") or ""),
+            author=str(author.get("login") or ""),
+            labels=labels,
+            state=str(data.get("state") or "open").upper(),
         )
 
 
@@ -84,7 +103,7 @@ class PullRequestStatus:
 
 @dataclass(frozen=True)
 class Comment:
-    """A GitHub issue comment used as live worker feedback."""
+    """A forge issue comment used as live worker feedback."""
 
     id: int
     author: str
@@ -95,6 +114,11 @@ class Comment:
     @classmethod
     def from_json(cls, data: dict[str, Any]) -> Comment:
         """Build a comment from ``gh api`` output."""
+        return cls.from_forgejo(data)
+
+    @classmethod
+    def from_forgejo(cls, data: dict[str, Any]) -> Comment:
+        """Build a comment from a Forgejo API response."""
         user = data.get("user") or {}
         return cls(
             id=int(data["id"]),

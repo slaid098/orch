@@ -1,10 +1,11 @@
 # orch
 
-Minimal GitHub issue to pull request orchestrator for containerized coding agents.
+Minimal issue-to-pull-request orchestrator for GitHub and Forgejo with
+containerized coding agents.
 
-`orch` watches GitHub issues labelled `agent:queued`, runs a worker container
+`orch` watches forge issues labelled `agent:queued`, runs a worker container
 with Claude Code, validates a deterministic commit, runs the repository tests,
-pushes the branch, and opens a pull request. It then waits for GitHub checks and
+pushes the branch, and opens a pull request. It then waits for forge checks and
 runs two separate read-only reviewer containers (quality and security). By
 default an approved pull request stays open for a human to merge. Opt-in
 `reviewer.auto_merge: true` squash-merges it into `main` only when every check is
@@ -13,7 +14,7 @@ green and both reviewers return no findings.
 ## What it does
 
 ```text
-GitHub issue with agent:queued
+Issue with agent:queued
   -> orch claims it (agent:running)
   -> clones origin/main once for the issue
   -> worker implements the issue in a persistent /work volume
@@ -23,7 +24,7 @@ GitHub issue with agent:queued
   -> orch runs the configured tests
   -> orch pushes type/scope/issue-N-description
   -> orch opens a standardized pull request
-  -> orch waits for GitHub checks
+  -> orch waits for forge checks
   -> failed checks return control to the worker, never to the reviewers
   -> quality and security reviewers run in parallel in isolated containers
   -> both must return an empty findings array; any finding blocks
@@ -33,8 +34,8 @@ GitHub issue with agent:queued
   -> three total worker attempts or three review rounds exhaust to needs-human
 ```
 
-The worker has no GitHub token. It cannot push or create pull requests. Both
-reviewers have no GitHub token and only read-only repository tools plus local
+The worker has no forge token. It cannot push or create pull requests. Both
+reviewers have no forge token and only read-only repository tools plus local
 CodeGraph and Context7. Reviewers never receive Playwright or antidetect-browser
 access. Only the orchestrator process writes and comments; it merges only when
 `reviewer.auto_merge` is explicitly enabled.
@@ -67,7 +68,7 @@ as the next attempt's previous failure. Reviewers are never started for a red
 pull request or for a stale commit.
 
 Two reviewers run in parallel, each in its own container with the worker
-checkout mounted read-only at `/review` and no GitHub token:
+checkout mounted read-only at `/review` and no forge token:
 
 - **Quality** (`prompt.md`) checks correctness, regressions, tests, and issue
   scope.
@@ -94,7 +95,7 @@ worker attempt. A technical failure in either role is fail-closed.
 
 Worker attempts and reviewer rounds share one budget. `worker.max_attempts`
 defaults to 3 and `reviewer.max_rounds` defaults to 3. A failed worker attempt, a
-failed GitHub check, and a reviewer rejection all consume the next attempt. A
+failed forge check, and a reviewer rejection all consume the next attempt. A
 technical reviewer failure (invalid JSON after one repair launch, timeout, or
 container failure) does not consume a worker attempt: the issue is parked
 immediately in `agent:needs-human`.
@@ -198,7 +199,7 @@ antidetect-browser stay worker-only. Antidetect is opt-in: set
 must use HTTPS; plain HTTP is accepted only for local or private addresses such
 as `host.docker.internal`, `localhost`, loopback, and RFC1918 hosts.
 
-Create the issue on GitHub and add the `agent:queued` label. Add `agent:hold`
+Create the issue on the configured forge and add the `agent:queued` label. Add `agent:hold`
 at any time before dispatch to keep orch away from the issue. Before the first
 run, or after changing the image, model endpoint, or credentials, verify the
 environment:
@@ -209,7 +210,7 @@ uv run python main.py --check
 
 `--check` takes no instance lock and changes nothing remote. It verifies the
 Docker daemon and both images, the model endpoint at `127.0.0.1:11434`, the
-GitHub token owner and repository access, the base branch, and free disk space.
+forge token owner and repository access, the base branch, and free disk space.
 It prints every problem and exits with code `1` if any check fails. The daemon
 and `--once` run the same checks after taking the lock and before touching
 labels, the database, or containers.
@@ -248,7 +249,7 @@ uv run python main.py --issue N --once
 directly (the `agent:queued` label is not required), claims it
 (`agent:running`), runs the worker, validates and squashes the commit, runs
 `worker.test_commands`, pushes the branch, opens the pull request, waits for
-GitHub checks, and runs the reviewer. An approved pull request stays open for
+forge checks, and runs the reviewer. An approved pull request stays open for
 manual merge by default, or is merged when `reviewer.auto_merge: true`. It
 processes exactly one issue and never polls.
 
@@ -272,7 +273,7 @@ Use this checklist for the first controlled run against a real issue. Complete
 [Setup](#setup) first.
 
 1. **Run the startup checks.** This verifies Docker, both images, the model
-   endpoint, GitHub access, the base branch, and free disk space:
+   endpoint, forge access, the base branch, and free disk space:
 
    ```powershell
    uv run python main.py --check
@@ -287,8 +288,9 @@ Use this checklist for the first controlled run against a real issue. Complete
    If `worker.image`, or a separately configured `reviewer.image`, uses another
    tag, build and inspect that tag instead.
 
-2. **Check the target repository.** The issue must be created in the GitHub
-   repository configured as `repo.owner`/`repo.name`. `orch` talks to GitHub
+2. **Check the target repository.** The issue must be created in the repository
+   configured as `repo.owner`/`repo.name`. `orch` talks to the forge selected by
+   `repo.forge`
    through `gh`; an issue that exists only in Forgejo, or only in a mirror, is
    not visible to it and the run cannot start.
 
@@ -314,11 +316,11 @@ Use this checklist for the first controlled run against a real issue. Complete
    - `Issue #N attempt 1/3` — the worker started.
    - `Worker tests passed` — `worker.test_commands` succeeded locally.
    - `Created pull request: <url>` — the branch was pushed and the PR opened.
-   - `Started reviewer container orch-review-...` — every reported GitHub check
+   - `Started reviewer container orch-review-...` — every reported forge check
      is complete and none failed. A failed check logs `Issue attempt failed`;
      the full `ChecksFailed: ...` text, including the failing check names, is
      posted as a comment on the issue, and orch starts the next attempt. No
-     reviewer is started for a red PR. If GitHub reports no checks at all, orch
+     reviewer is started for a red PR. If the forge reports no checks at all, orch
      waits for `checks.discovery_seconds` and continues on the local test
      result.
    - `Reviewer role quality: approved` and `Reviewer role security: approved` —
@@ -336,7 +338,7 @@ Use this checklist for the first controlled run against a real issue. Complete
 
    - Success: exit code `0`. With auto-merge, the status line is
      `merged: <url>`, the issue is closed, and `result.json` has
-     `"status": "merged"` plus `merge_commit` when GitHub reported it. Without
+     `"status": "merged"` plus `merge_commit` when the forge reported it. Without
      auto-merge, the status is `pr_open` and the PR waits for a human.
    - Parked: exit code `1`, the status line `Needs human: ...`, the issue
      carries `agent:needs-human` and a comment with the error and run ID, and
@@ -407,11 +409,72 @@ Copy `orch.yaml.example` to `orch.yaml` and adjust paths, labels, commands, and
 the model. `orch.yaml` and `app_data/` are ignored by git.
 
 The base branch is fetched into a local bare mirror under `data_dir`; the worker
-never receives a GitHub token and never fetches from GitHub directly.
+never receives a forge token and never fetches directly.
 `reviewer.image` and `reviewer.model` fall back to the worker image and model
 when omitted. Reviewers are read-only and usually finish in about 7–8 minutes;
 the default 30-minute timeout is a safety cap, while the worker keeps its longer
 90-minute budget for implementation and tests.
+
+### Forge selection
+
+`repo.forge` selects the API and the pull-request workflow: `github` (default)
+or `forgejo`. For Forgejo, `repo.url` is required (for example
+`https://git.example.com`), and the token is read from `ORCH_FORGEJO_TOKEN`
+first, then `FORGEJO_TOKEN`. The repository's git remote must point to the same
+host. Both forges use the same branch, issue, review, and gate flow. Forgejo
+reads `.github/workflows`, so no `.forgejo/workflows` directory is needed.
+
+### Per-role skills
+
+`worker.skills` and `reviewer.skills` list directory names under `skills_dir`
+(default `skills/` next to `orch.yaml`). Each selected directory must contain
+`SKILL.md`; `--check` fails only when a named skill is missing, and an empty
+list is valid. Selected directories are mounted read-only into the
+corresponding container under `~/.claude/skills/<name>`. `prompt.md` stays
+orchestration-only; role-specific code rules belong in skills.
+
+### Multiple projects
+
+One daemon can serve several repositories. Replace the top-level `repo` block
+with a `projects` list and keep shared settings at the top level:
+
+```yaml
+data_dir: D:/orch/app_data
+max_workers: 2
+worker:
+  test_commands:
+    - uv run pytest -q
+projects:
+  - name: orch
+    repo:
+      owner: slaid098
+      name: orch
+      path: D:/Python projects/orch
+      forge: github
+  - name: antidetect
+    repo:
+      owner: slaid098
+      name: antidetect-browser-mcp
+      path: D:/Python projects/antidetect-browser-mcp
+      forge: forgejo
+      url: https://git.slaid098.dev
+    worker:
+      test_commands:
+        - uv run pytest -m "not live" -q
+```
+
+Top-level `labels`, `worker`, `checks`, `reviewer`, `mcp`, `feedback`, and
+`watchdog` are defaults; each project deep-merges its own sections over them,
+and lists such as `test_commands` are replaced rather than concatenated.
+`data_dir`, `skills_dir`, `poll_interval_seconds`, `max_workers`,
+`retention_days`, `workspace_retention_days`, `min_free_disk_gb`, and `telegram`
+are global and may only appear at the top level.
+
+One shared pool of `max_workers` slots serves all projects. Each project keeps
+its own issue polling, labels, mirror, workspaces, and run directories; run ids
+include a repository hash so containers cannot collide. `--check` validates
+every project. `--once` needs `--project <name>` when more than one project is
+configured. A file without `projects` still loads as one project.
 
 Feature flags:
 
@@ -425,7 +488,7 @@ Feature flags:
   green checks and leave the PR for a human.
 - `reviewer.auto_merge` — opt-in squash merge after green checks and an
   approved review. Default `false` leaves the PR open for manual merge.
-- `checks.*` — GitHub check polling timeout, interval, and the grace period for
+- `checks.*` — forge check polling timeout, interval, and the grace period for
   checks to appear after a PR is opened.
 - `mcp.*` — enable or disable CodeGraph, Context7, Playwright, and
   antidetect-browser and override their URLs/commands. Antidetect is disabled
@@ -462,7 +525,7 @@ the volume has less space.
 - The worker runs in a disposable container.
 - `/src` is a read-only clone of the issue base revision.
 - `/work` is the persistent workspace, not readable by the orchestrator token.
-- The worker has no GitHub token and cannot push.
+- The worker has no forge token and cannot push.
 - Only the issue author and explicitly allowed users can inject comments; bot
   comments are filtered out, and orch's own marked comments enter revision
   context only when their author is allowed. Comment text is still treated as
@@ -473,7 +536,7 @@ the volume has less space.
 - The orchestrator validates the bundle, creates the commit, pushes the branch,
   and opens the pull request.
 - Each reviewer is a separate container with the checkout mounted read-only at
-  `/review`, no GitHub token, and no direct internet route. A gateway forwards
+  `/review`, no forge token, and no direct internet route. A gateway forwards
   only the model port and Context7 TLS.
 - Reviewer JSON is schema-validated and fail-closed; invalid output never
   approves or merges. A repair launch is allowed once per review role per

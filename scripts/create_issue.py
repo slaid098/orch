@@ -1,35 +1,39 @@
-"""Create a GitHub issue that satisfies the orch workflow policy."""
+"""Create a forge issue that satisfies the orch workflow policy."""
 
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 from pathlib import Path
 
 from loguru import logger
 
 from orch.exceptions.standards import StandardsError
+from orch.services.forgejo import create_issue as create_forgejo_issue
 from orch.services.standards import validate_title
 from orch.services.standards.policy import validate_issue_body
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Validate and create one GitHub issue.
+    """Validate and create one issue on the selected forge.
 
     Args:
         argv: Optional argument list, mainly for tests.
 
     Returns:
-        Process exit code: 0 on success, 1 on GitHub failure, 2 on invalid input.
+        Process exit code: 0 on success, 1 on a forge failure, 2 on invalid
+        input.
     """
     args = _parse_args(argv)
     try:
         title = validate_title(args.title)
-        validate_issue_body(_read_body(Path(args.body_file)))
+        body = _read_body(Path(args.body_file))
+        validate_issue_body(body)
         if args.validate_only:
             print(f"OK: {title}")
             return 0
-        url = _create_issue(args, title)
+        url = _create_issue(args, title, body)
     except StandardsError as ex:
         logger.bind(error=ex, error_type=type(ex).__name__).error(
             "Issue input does not satisfy the workflow policy: {}", ex
@@ -49,7 +53,9 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--title", required=True)
     parser.add_argument("--body-file", required=True)
+    parser.add_argument("--forge", choices=("github", "forgejo"), default="github")
     parser.add_argument("--repo", default=None)
+    parser.add_argument("--url", default=None, help="Forgejo base URL")
     parser.add_argument("--label", action="append", default=None)
     parser.add_argument("--validate-only", action="store_true")
     return parser.parse_args(argv)
@@ -59,7 +65,40 @@ def _read_body(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
-def _create_issue(args: argparse.Namespace, title: str) -> str:
+def _create_issue(
+    args: argparse.Namespace,
+    title: str,
+    body: str,
+) -> str:
+    if args.forge == "forgejo":
+        return _create_forgejo_issue(args, title, body)
+    return _create_github_issue(args, title)
+
+
+def _create_forgejo_issue(
+    args: argparse.Namespace,
+    title: str,
+    body: str,
+) -> str:
+    if not args.repo:
+        raise RuntimeError("--repo is required when --forge is forgejo")
+    url = (args.url or os.environ.get("FORGEJO_URL") or "").strip()
+    if not url:
+        raise RuntimeError("Set FORGEJO_URL or pass --url when --forge is forgejo")
+    token = (os.environ.get("FORGEJO_TOKEN") or "").strip()
+    if not token:
+        raise RuntimeError("Set FORGEJO_TOKEN to create a Forgejo issue")
+    return create_forgejo_issue(
+        url,
+        args.repo,
+        token,
+        title=title,
+        body=body,
+        labels=tuple(args.label or ["agent:queued"]),
+    )
+
+
+def _create_github_issue(args: argparse.Namespace, title: str) -> str:
     command = [
         "gh",
         "issue",

@@ -8,13 +8,15 @@ from pathlib import Path
 
 @dataclass(frozen=True)
 class RepoConfig:
-    """GitHub repository and local checkout settings."""
+    """Forge repository and local checkout settings."""
 
     owner: str
     name: str
     path: Path
     base_branch: str = "main"
     remote: str = "origin"
+    forge: str = "github"
+    url: str = ""
 
     @property
     def full_name(self) -> str:
@@ -45,6 +47,7 @@ class WorkerConfig:
     autocompact: str = "200k"
     setup_commands: tuple[str, ...] = ()
     test_commands: tuple[str, ...] = ()
+    skills: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -106,6 +109,7 @@ class ReviewerConfig:
     autocompact: str = "200k"
     allowed_tools: str = "Read,Grep,Glob"
     auto_merge: bool = False
+    skills: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -131,12 +135,15 @@ class Config:
     labels: LabelsConfig
     worker: WorkerConfig
     data_dir: Path
+    name: str = ""
+    skills_dir: Path = field(default_factory=lambda: Path("skills"))
     poll_interval_seconds: int = 30
     max_workers: int = 2
     retention_days: int = 7
     workspace_retention_days: int = 14
     min_free_disk_gb: int = 5
     gh_token: str | None = None
+    forgejo_token: str | None = None
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
     feedback: FeedbackConfig = field(default_factory=FeedbackConfig)
     watchdog: WatchdogConfig = field(default_factory=WatchdogConfig)

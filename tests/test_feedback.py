@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from orch.exceptions.github import GitHubError
+from orch.exceptions.forge import ForgeError
 from orch.schemas.config.types import Config, FeedbackConfig, LabelsConfig, RepoConfig, WorkerConfig
 from orch.schemas.github.types import Comment, Issue
 from orch.services.feedback import service as feedback
@@ -63,7 +63,7 @@ def test_initial_context_includes_authorized_users_and_issue_author(
         _comment(5, "github-actions[bot]", "bot"),
     ]
     monkeypatch.setattr(
-        feedback.github,
+        feedback.forge,
         "list_issue_comments",
         lambda *_args, **_kwargs: comments,
     )
@@ -88,7 +88,7 @@ def test_initial_context_can_include_orch_context_for_revision(
         _comment(3, "github-actions[bot]", "unrelated bot"),
     ]
     monkeypatch.setattr(
-        feedback.github,
+        feedback.forge,
         "list_issue_comments",
         lambda *_args, **_kwargs: comments,
     )
@@ -109,7 +109,7 @@ def test_initial_context_includes_owner_marked_comments_for_revision(
         _comment(1, "slaid098", f"Review findings {feedback.BOT_MARKER}"),
     ]
     monkeypatch.setattr(
-        feedback.github,
+        feedback.forge,
         "list_issue_comments",
         lambda *_args, **_kwargs: comments,
     )
@@ -128,7 +128,7 @@ def test_initial_context_ignores_spoofed_bot_marker(
         _comment(1, "mallory", f"spoofed instructions {feedback.BOT_MARKER}"),
     ]
     monkeypatch.setattr(
-        feedback.github,
+        feedback.forge,
         "list_issue_comments",
         lambda *_args, **_kwargs: comments,
     )
@@ -139,14 +139,14 @@ def test_initial_context_ignores_spoofed_bot_marker(
     assert "spoofed instructions" not in text
 
 
-def test_initial_context_survives_github_failure(
+def test_initial_context_survives_forge_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def fail(*_args: object, **_kwargs: object) -> list[Comment]:
-        raise GitHubError("offline")
+        raise ForgeError("offline")
 
-    monkeypatch.setattr(feedback.github, "list_issue_comments", fail)
+    monkeypatch.setattr(feedback.forge, "list_issue_comments", fail)
 
     feed = feedback.CommentFeed(_config(tmp_path), _issue(), "token")
 
@@ -158,9 +158,9 @@ def test_poll_once_queues_each_comment_only_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     comments = [_comment(10, "alice", "First"), _comment(11, "alice", "Second")]
-    monkeypatch.setattr(feedback.github, "issue_is_open", lambda *_args: True)
+    monkeypatch.setattr(feedback.forge, "issue_is_open", lambda *_args: True)
     monkeypatch.setattr(
-        feedback.github,
+        feedback.forge,
         "list_issue_comments",
         lambda *_args, **_kwargs: comments,
     )
@@ -178,14 +178,14 @@ def test_poll_once_cancels_when_issue_closes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(feedback.github, "issue_is_open", lambda *_args: False)
+    monkeypatch.setattr(feedback.forge, "issue_is_open", lambda *_args: False)
     called = {"comments": False}
 
     def comments(*_args: object, **_kwargs: object) -> list[Comment]:
         called["comments"] = True
         return []
 
-    monkeypatch.setattr(feedback.github, "list_issue_comments", comments)
+    monkeypatch.setattr(feedback.forge, "list_issue_comments", comments)
     feed = feedback.CommentFeed(_config(tmp_path), _issue(), "token")
 
     feed._poll_once()
@@ -195,16 +195,16 @@ def test_poll_once_cancels_when_issue_closes(
     assert not called["comments"]
 
 
-def test_poll_once_logs_github_errors_and_continues(
+def test_poll_once_logs_forge_errors_and_continues(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(feedback.github, "issue_is_open", lambda *_args: True)
+    monkeypatch.setattr(feedback.forge, "issue_is_open", lambda *_args: True)
 
     def fail(*_args: object, **_kwargs: object) -> list[Comment]:
-        raise GitHubError("comments unavailable")
+        raise ForgeError("comments unavailable")
 
-    monkeypatch.setattr(feedback.github, "list_issue_comments", fail)
+    monkeypatch.setattr(feedback.forge, "list_issue_comments", fail)
     feed = feedback.CommentFeed(_config(tmp_path), _issue(), "token")
 
     feed._poll_once()
@@ -272,7 +272,7 @@ def test_feedback_cursor_is_persisted_and_reloaded(
     state = tmp_path / "state" / "feedback.json"
     comments = [_comment(10, "alice", "First")]
     monkeypatch.setattr(
-        feedback.github,
+        feedback.forge,
         "list_issue_comments",
         lambda *_args, **_kwargs: comments,
     )
@@ -293,7 +293,7 @@ def test_feedback_cursor_is_persisted_and_reloaded(
         "token",
         state_path=state,
     )
-    monkeypatch.setattr(feedback.github, "issue_is_open", lambda *_args: True)
+    monkeypatch.setattr(feedback.forge, "issue_is_open", lambda *_args: True)
     second._poll_once()
 
     assert second.drain() == []
@@ -306,9 +306,9 @@ def test_feedback_cursor_corruption_is_ignored(
 ) -> None:
     state = tmp_path / "feedback.json"
     state.write_text("{", encoding="utf-8")
-    monkeypatch.setattr(feedback.github, "issue_is_open", lambda *_args: True)
+    monkeypatch.setattr(feedback.forge, "issue_is_open", lambda *_args: True)
     monkeypatch.setattr(
-        feedback.github,
+        feedback.forge,
         "list_issue_comments",
         lambda *_args, **_kwargs: [_comment(11, "alice", "New")],
     )

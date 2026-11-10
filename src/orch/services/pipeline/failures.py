@@ -9,7 +9,7 @@ from orch.exceptions.worker import RunCancelled, WatchdogStop
 from orch.schemas.config.types import Config
 from orch.schemas.github.types import Issue
 from orch.schemas.pipeline.types import RunOutcome
-from orch.services import github, notify
+from orch.services import forge, notify
 from orch.services.pipeline.lifecycle import (
     _cancel_run,
     _park_after_retries,
@@ -32,11 +32,11 @@ def _comment_attempt_failure(
         "Запускаю следующую попытку в том же workspace с новым контекстом."
     )
     try:
-        github.comment_issue(
-            config.repo.full_name,
+        forge.comment_issue(
+            config,
             issue.number,
             token,
-            github.mark_bot_body(message),
+            forge.mark_bot_body(message),
         )
     except Exception as notify_error:
         log.bind(

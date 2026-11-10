@@ -10,12 +10,13 @@ from orch.exceptions.instance import InstanceLockError
 from orch.schemas.config.types import Config, LabelsConfig, RepoConfig, WorkerConfig
 
 
-def _config(tmp_path: Path) -> Config:
+def _config(tmp_path: Path, name: str = "orch") -> Config:
     return Config(
-        repo=RepoConfig(owner="slaid098", name="orch", path=tmp_path),
+        repo=RepoConfig(owner="slaid098", name=name, path=tmp_path),
         labels=LabelsConfig(),
         worker=WorkerConfig(test_commands=("pytest",)),
         data_dir=tmp_path / "data",
+        name=name,
     )
 
 
@@ -29,9 +30,9 @@ def test_no_arguments_starts_the_daemon(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config = _config(tmp_path)
-    calls: list[tuple[Config, str]] = []
+    calls: list[tuple[tuple[Config, ...], dict[str, str]]] = []
 
-    monkeypatch.setattr(orch_main, "load_config", lambda _path: config)
+    monkeypatch.setattr(orch_main, "load_projects", lambda _path: (config,))
     monkeypatch.setattr(orch_main, "setup_logging", lambda _config: None)
     monkeypatch.setattr(orch_main, "initialize", lambda _config: "token")
     monkeypatch.setattr(
@@ -41,7 +42,7 @@ def test_no_arguments_starts_the_daemon(
     )
 
     assert orch_main.main([]) == 0
-    assert calls == [(config, "token")]
+    assert calls == [((config,), {"slaid098/orch": "token"})]
 
 
 def test_debug_mode_runs_one_issue(
@@ -51,7 +52,7 @@ def test_debug_mode_runs_one_issue(
     config = _config(tmp_path)
     calls: list[tuple[Config, str, int]] = []
 
-    monkeypatch.setattr(orch_main, "load_config", lambda _path: config)
+    monkeypatch.setattr(orch_main, "load_projects", lambda _path: (config,))
     monkeypatch.setattr(orch_main, "setup_logging", lambda _config: None)
     monkeypatch.setattr(orch_main, "initialize", lambda _config: "token")
     monkeypatch.setattr(
@@ -64,6 +65,49 @@ def test_debug_mode_runs_one_issue(
     assert calls == [(config, "token", 7)]
 
 
+def test_debug_mode_selects_a_project(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = _config(tmp_path, "orch")
+    second = _config(tmp_path, "antidetect-browser-mcp")
+    calls: list[tuple[str, int]] = []
+
+    monkeypatch.setattr(orch_main, "load_projects", lambda _path: (first, second))
+    monkeypatch.setattr(orch_main, "setup_logging", lambda _config: None)
+    monkeypatch.setattr(
+        orch_main,
+        "initialize",
+        lambda config: f"token-{config.name}",
+    )
+    monkeypatch.setattr(
+        orch_main,
+        "run_once",
+        lambda config, token, issue: calls.append((token, issue)) or 0,
+    )
+
+    assert orch_main.main(["--issue", "7", "--once", "--project", "antidetect-browser-mcp"]) == 0
+    assert calls == [("token-antidetect-browser-mcp", 7)]
+
+
+def test_debug_mode_requires_a_project_when_several_are_configured(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = _config(tmp_path, "orch")
+    second = _config(tmp_path, "antidetect-browser-mcp")
+
+    monkeypatch.setattr(orch_main, "load_projects", lambda _path: (first, second))
+    monkeypatch.setattr(orch_main, "setup_logging", lambda _config: None)
+    monkeypatch.setattr(
+        orch_main,
+        "initialize",
+        lambda _config: pytest.fail("initialize must not run without a project"),
+    )
+
+    assert orch_main.main(["--issue", "7", "--once"]) == 2
+
+
 @pytest.mark.parametrize(
     "argv",
     [
@@ -71,6 +115,8 @@ def test_debug_mode_runs_one_issue(
         ["--once"],
         ["--check", "--once"],
         ["--check", "--issue", "7", "--once"],
+        ["--check", "--project", "orch"],
+        ["--project", "orch"],
     ],
 )
 def test_debug_flags_must_be_used_together(argv: list[str]) -> None:
@@ -89,6 +135,7 @@ def test_help_lists_only_debug_flags(capsys: pytest.CaptureFixture[str]) -> None
     assert "--issue" in out
     assert "--once" in out
     assert "--check" in out
+    assert "--project" in out
     for command in ("status", "build-image", "logs"):
         assert command not in out
 
@@ -96,10 +143,10 @@ def test_help_lists_only_debug_flags(capsys: pytest.CaptureFixture[str]) -> None
 def test_config_error_returns_exit_code_two(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def fail(_path: Path) -> Config:
+    def fail(_path: Path) -> tuple[Config, ...]:
         raise ConfigError("missing")
 
-    monkeypatch.setattr(orch_main, "load_config", fail)
+    monkeypatch.setattr(orch_main, "load_projects", fail)
 
     assert orch_main.main([]) == 2
 
@@ -109,7 +156,7 @@ def test_initialization_error_returns_exit_code_one(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config = _config(tmp_path)
-    monkeypatch.setattr(orch_main, "load_config", lambda _path: config)
+    monkeypatch.setattr(orch_main, "load_projects", lambda _path: (config,))
     monkeypatch.setattr(orch_main, "setup_logging", lambda _config: None)
 
     def fail(_config: Config) -> str:
@@ -125,7 +172,7 @@ def test_busy_instance_returns_exit_code_one(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config = _config(tmp_path)
-    monkeypatch.setattr(orch_main, "load_config", lambda _path: config)
+    monkeypatch.setattr(orch_main, "load_projects", lambda _path: (config,))
     monkeypatch.setattr(orch_main, "setup_logging", lambda _config: None)
     monkeypatch.setattr(
         orch_main,
@@ -146,9 +193,9 @@ def test_check_runs_preflight_without_the_lock(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config = _config(tmp_path)
-    calls: list[tuple[Config, bool]] = []
+    calls: list[tuple[tuple[Config, ...], bool]] = []
 
-    monkeypatch.setattr(orch_main, "load_config", lambda _path: config)
+    monkeypatch.setattr(orch_main, "load_projects", lambda _path: (config,))
     monkeypatch.setattr(orch_main, "setup_logging", lambda _config: None)
     monkeypatch.setattr(
         orch_main,
@@ -162,7 +209,7 @@ def test_check_runs_preflight_without_the_lock(
     )
 
     assert orch_main.main(["--check"]) == 0
-    assert calls == [(config, False)]
+    assert calls == [((config,), False)]
 
 
 def test_check_failure_returns_exit_code_one(
@@ -171,7 +218,7 @@ def test_check_failure_returns_exit_code_one(
 ) -> None:
     config = _config(tmp_path)
 
-    monkeypatch.setattr(orch_main, "load_config", lambda _path: config)
+    monkeypatch.setattr(orch_main, "load_projects", lambda _path: (config,))
     monkeypatch.setattr(orch_main, "setup_logging", lambda _config: None)
     monkeypatch.setattr(
         orch_main,
@@ -188,7 +235,7 @@ def test_failed_preflight_blocks_initialization(
 ) -> None:
     config = _config(tmp_path)
 
-    monkeypatch.setattr(orch_main, "load_config", lambda _path: config)
+    monkeypatch.setattr(orch_main, "load_projects", lambda _path: (config,))
     monkeypatch.setattr(orch_main, "setup_logging", lambda _config: None)
     monkeypatch.setattr(orch_main, "_preflight", lambda _config, **_kwargs: False)
     monkeypatch.setattr(
@@ -198,4 +245,3 @@ def test_failed_preflight_blocks_initialization(
     )
 
     assert orch_main.main([]) == 1
-

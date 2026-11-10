@@ -1,13 +1,14 @@
 ---
 name: Create Issue
-description: Create a validated GitHub issue for the orch pipeline. Use when the user asks to create, file, or open an issue for this repository.
+description: Create a validated forge issue for the orch pipeline. Use when the user asks to create, file, or open an issue for this repository.
 ---
 
 # Create Issue
 
-Create one GitHub issue through the project validator. The script uses
+Create one issue through the project validator. The script uses
 `services/standards/policy.py` as the source of truth, so do not reimplement or
-bypass its rules.
+bypass its rules. Both GitHub and Forgejo targets are supported; choose the
+forge that hosts the target repository.
 
 ## Workflow
 
@@ -77,13 +78,27 @@ bypass its rules.
      --body-file "<temp-file>"
    ```
 
-   The script validates again and only then calls `gh issue create`. It adds the
-   `agent:queued` label by default.
+   For a Forgejo-hosted repository, select the forge explicitly. The token is
+   read from `FORGEJO_TOKEN`; never pass it on the command line:
+
+   ```bash
+   uv run python scripts/create_issue.py \
+     --forge forgejo \
+     --repo "owner/name" \
+     --url "https://git.example.test" \
+     --title "type(scope): description" \
+     --body-file "<temp-file>"
+   ```
+
+   `FORGEJO_URL` may replace `--url`. The script validates again and only then
+   calls the forge API. It adds the `agent:queued` label by default and resolves
+   label IDs before creating a Forgejo issue.
 8. Report the created issue URL and title.
 
 ## Rules
 
-- Never call `gh issue create` directly for this repository.
+- Never call `gh issue create` or the Forgejo API directly for a target
+  repository.
 - Never leave `TBD`, `TODO`, `???`, or similar placeholders in the body.
 - Never use `needs-human` to work around an invalid title.
 - Keep the title English and the body Russian.

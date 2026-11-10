@@ -6,15 +6,15 @@ import time
 from pathlib import Path
 
 from orch.config.logger import get_logger
-from orch.exceptions.github import GitHubError
+from orch.exceptions.forge import ForgeError
 from orch.exceptions.pipeline import ChecksFailed
 from orch.exceptions.worker import RunCancelled
 from orch.schemas.config.types import Config
 from orch.schemas.github.types import Issue, PullRequestStatus
 from orch.schemas.pipeline.types import AttemptSuccess, RunOutcome
 from orch.schemas.reviewer.types import ReviewFinding, ReviewResult
+from orch.services import forge, notify, store
 from orch.services import git as gitops
-from orch.services import github, notify, store
 from orch.services.feedback.service import CommentFeed
 from orch.services.pipeline.lifecycle import (
     _STATUS_MERGED,
@@ -70,8 +70,8 @@ def _wait_for_checks(
         if reason is not None:
             raise RunCancelled(reason)
         try:
-            status = github.get_pr_status(config.repo.full_name, pr_url, token)
-        except GitHubError as ex:
+            status = forge.get_pr_status(config, pr_url, token)
+        except ForgeError as ex:
             last_error = str(ex)
             log.bind(pr_url=pr_url, error=ex, error_type=type(ex).__name__).warning(
                 "Could not read pull-request checks; retrying"
@@ -82,7 +82,7 @@ def _wait_for_checks(
                     pr_url=pr_url,
                     expected_head=expected_head,
                     actual_head=status.head_sha,
-                ).info("Waiting for GitHub to report checks for the pushed commit")
+                ).info("Waiting for the forge to report checks for the pushed commit")
                 last_status = status
             else:
                 last_status = status
@@ -93,25 +93,25 @@ def _wait_for_checks(
                 if status.checks and not status.pending:
                     return _format_checks(status)
                 if not status.checks and time.monotonic() >= discovery_deadline:
-                    return "No GitHub checks were reported; local tests passed."
+                    return "No CI checks were reported; local tests passed."
         now = time.monotonic()
         if now >= deadline:
             if last_status is None:
-                raise ChecksFailed(f"Could not read GitHub checks before timeout: {last_error}")
-            raise ChecksFailed("GitHub checks did not finish before timeout")
+                raise ChecksFailed(f"Could not read CI checks before timeout: {last_error}")
+            raise ChecksFailed("CI checks did not finish before timeout")
         time.sleep(min(config.checks.poll_seconds, max(1, deadline - now)))
 
 
 def _format_checks(status: PullRequestStatus) -> str:
     lines = [f"{check.name}: {check.state}" for check in status.checks]
-    return "\n".join(lines) if lines else "No GitHub checks were reported."
+    return "\n".join(lines) if lines else "No CI checks were reported."
 
 
 def _format_check_failure(status: PullRequestStatus) -> str:
     failed = [check for check in status.checks if check.state == "failure"]
     lines = [f"{check.name}: {check.state}" for check in failed]
     details = "\n".join(lines) or "unknown check failure"
-    return f"GitHub checks failed:\n{details}"
+    return f"CI checks failed:\n{details}"
 
 
 def _finish_pr_open(
@@ -127,7 +127,7 @@ def _finish_pr_open(
     review_rounds: int = 0,
 ) -> RunOutcome:
     _best_effort_labels(
-        config.repo.full_name,
+        config,
         issue.number,
         token,
         add=(config.labels.pr_open,),
@@ -195,12 +195,12 @@ def _merge_and_finish(
             review_rounds=review_rounds,
         )
     try:
-        merge_commit = github.merge_pr(
-            config.repo.full_name,
+        merge_commit = forge.merge_pr(
+            config,
             attempt_result.pr_url,
             token,
         )
-    except GitHubError as ex:
+    except ForgeError as ex:
         _log_merge_error(issue, attempt_result, ex)
         return _park_merge_error(
             config,
@@ -231,7 +231,7 @@ def _merge_and_finish(
 def _log_merge_error(
     issue: Issue,
     attempt_result: AttemptSuccess,
-    error: GitHubError,
+    error: ForgeError,
 ) -> None:
     log.bind(
         issue=issue.number,
@@ -308,7 +308,7 @@ def _record_merge(
     merge_commit: str,
 ) -> RunOutcome:
     _best_effort_comment(
-        config.repo.full_name,
+        config,
         issue.number,
         token,
         f"Ревьюер одобрил PR. Merge: {attempt_result.pr_url}\n\n"
@@ -382,8 +382,8 @@ def _cancellation_reason(
     if feed is not None and feed.cancelled:
         return feed.cancel_reason or "issue closed"
     try:
-        is_open = github.issue_is_open(config.repo.full_name, issue.number, token)
-    except GitHubError as ex:
+        is_open = forge.issue_is_open(config, issue.number, token)
+    except ForgeError as ex:
         log.bind(
             issue=issue.number,
             error=ex,
@@ -401,7 +401,7 @@ def _comment_review_findings(
     findings: tuple[ReviewFinding, ...],
 ) -> None:
     _best_effort_comment(
-        config.repo.full_name,
+        config,
         issue.number,
         token,
         _format_findings(findings),
@@ -424,12 +424,12 @@ def _format_findings(findings: tuple[ReviewFinding, ...]) -> str:
 
 def _ensure_issue_open(config: Config, issue: Issue, token: str) -> None:
     try:
-        is_open = github.issue_is_open(
-            config.repo.full_name,
+        is_open = forge.issue_is_open(
+            config,
             issue.number,
             token,
         )
-    except GitHubError as ex:
+    except ForgeError as ex:
         log.bind(
             issue=issue.number,
             error=ex,

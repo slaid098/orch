@@ -6,7 +6,22 @@ from pathlib import Path
 import pytest
 
 from orch.exceptions.git import GitError
+from orch.schemas.config.types import (
+    Config,
+    LabelsConfig,
+    RepoConfig,
+    WorkerConfig,
+)
 from orch.services.git import service as git
+
+
+def _config(tmp_path: Path) -> Config:
+    return Config(
+        repo=RepoConfig(owner="slaid098", name="orch", path=tmp_path),
+        labels=LabelsConfig(),
+        worker=WorkerConfig(test_commands=("pytest",)),
+        data_dir=tmp_path,
+    )
 
 
 def _proc(
@@ -30,10 +45,7 @@ def test_refresh_mirror_initializes_and_fetches(
     monkeypatch.setattr(git.subprocess, "run", fake_run)
 
     mirror = git.refresh_mirror(
-        tmp_path,
-        "slaid098",
-        "orch",
-        "main",
+        _config(tmp_path),
         "secret",
     )
 
@@ -58,7 +70,7 @@ def test_refresh_mirror_reuses_existing_repo(
         lambda args, **_kwargs: calls.append(args) or "",
     )
 
-    git.refresh_mirror(tmp_path, "slaid098", "orch", "main", "secret")
+    git.refresh_mirror(_config(tmp_path), "secret")
 
     assert all(call[:2] != ["init", "--bare"] for call in calls)
     assert calls[0][:3] == ["--git-dir", str(mirror), "symbolic-ref"]
@@ -231,10 +243,32 @@ def test_branch_sha_reads_the_local_branch(
     assert calls[0][-1] == "refs/heads/feature/branch"
 
 
-def test_authenticated_remote_contains_token() -> None:
-    remote = git.authenticated_remote("slaid098", "orch", "secret")
+def test_authenticated_remote_contains_token(tmp_path: Path) -> None:
+    remote = git.authenticated_remote(_config(tmp_path), "secret")
 
     assert remote == "https://x-access-token:secret@github.com/slaid098/orch.git"
+
+
+def test_authenticated_remote_uses_the_forgejo_host(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    config = Config(
+        repo=RepoConfig(
+            owner="slaid098",
+            name="orch",
+            path=tmp_path,
+            forge="forgejo",
+            url="https://git.example.test",
+        ),
+        labels=config.labels,
+        worker=config.worker,
+        data_dir=config.data_dir,
+    )
+
+    remote = git.authenticated_remote(config, "secret")
+
+    assert remote == (
+        "https://slaid098:secret@git.example.test/slaid098/orch.git"
+    )
 
 
 def test_run_git_returns_stdout(monkeypatch: pytest.MonkeyPatch) -> None:

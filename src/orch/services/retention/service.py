@@ -8,10 +8,10 @@ import time
 from pathlib import Path
 
 from orch.config.logger import get_logger
-from orch.exceptions.github import GitHubError
+from orch.exceptions.forge import ForgeError
 from orch.schemas.config.types import Config
+from orch.services import forge
 from orch.services import git as gitops
-from orch.services import github
 
 log = get_logger(component="retention")
 
@@ -63,7 +63,7 @@ def prune_workspaces(
 
     Args:
         config: Orchestrator configuration.
-        token: GitHub token used only for the open-pull-request lookup.
+        token: Forge token used only for the open-pull-request lookup.
         active_issues: Issue numbers with a run in progress.
 
     Returns:
@@ -89,12 +89,12 @@ def prune_workspaces(
         return 0
 
     try:
-        open_issues = github.open_pr_issue_numbers(
-            config.repo.full_name,
+        open_issues = forge.open_pr_issue_numbers(
+            config,
             candidates,
             token,
         )
-    except GitHubError as ex:
+    except ForgeError as ex:
         log.bind(error=ex, error_type=type(ex).__name__).warning(
             "Skipping workspace retention because the open-PR check failed"
         )

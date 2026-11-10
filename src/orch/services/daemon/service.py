@@ -4,24 +4,25 @@ from __future__ import annotations
 
 import sys
 import time
+from collections.abc import Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
 from orch.config.logger import get_logger, logger
-from orch.exceptions.github import GitHubError
+from orch.exceptions.forge import ForgeError
 from orch.schemas.config.types import Config
 from orch.schemas.github.types import Issue
 from orch.schemas.pipeline.types import RunOutcome
-from orch.services import github, notify, store
+from orch.services import forge, notify, store
 from orch.services.docker import cleanup_managed
-from orch.services.github.service import ensure_labels, ensure_user
 from orch.services.pipeline import run_issue
 from orch.services.retention import prune_runs, prune_workspaces
 
 log = get_logger(component="daemon")
 
 _CLAIM_NOTIFY_SECONDS = 1800
-_claim_notified_at: dict[int, float] = {}
+_ActiveKey = tuple[str, int]
+_claim_notified_at: dict[_ActiveKey, float] = {}
 
 
 def setup_logging(config: Config) -> None:
@@ -53,12 +54,12 @@ def initialize(config: Config) -> str:
         config: Orchestrator configuration.
 
     Returns:
-        GitHub token used by this process.
+        Forge token used by this process.
     """
-    token = github.resolve_token(config.repo.owner, config.gh_token)
-    ensure_user(token, config.repo.owner)
-    ensure_labels(
-        config.repo.full_name,
+    token = forge.resolve_token(config)
+    forge.ensure_user(config, token)
+    forge.ensure_labels(
+        config,
         token,
         [
             (config.labels.queued, "0e8a16", "Queued for orch"),
@@ -86,19 +87,19 @@ def run_once(config: Config, token: str, issue_number: int) -> int:
 
     Args:
         config: Orchestrator configuration.
-        token: GitHub token.
+        token: Forge token.
         issue_number: Issue to process.
 
     Returns:
         Process exit code.
     """
     try:
-        issue = github.get_issue(config.repo.full_name, issue_number, token)
-    except GitHubError as ex:
+        issue = forge.get_issue(config, issue_number, token)
+    except ForgeError as ex:
         log.bind(error=ex, error_type=type(ex).__name__).error("Could not fetch issue")
         notify.notify_error(
             config,
-            stage="github",
+            stage="forge",
             error=ex,
             issue_number=issue_number,
         )
@@ -140,99 +141,169 @@ def run_once(config: Config, token: str, issue_number: int) -> int:
     return 1
 
 
-def run_daemon(config: Config, token: str) -> int:
-    """Poll for queued issues until interrupted.
+def _projects(config: Config | Sequence[Config]) -> tuple[Config, ...]:
+    """Normalize one project or a project sequence to a tuple."""
+    if isinstance(config, Config):
+        return (config,)
+    projects = tuple(config)
+    if not projects:
+        raise ValueError("At least one project is required")
+    return projects
+
+
+def _tokens(
+    projects: Sequence[Config],
+    token: str | Mapping[str, str] | None,
+) -> dict[str, str]:
+    """Normalize a single token or a per-repository token mapping."""
+    if token is None:
+        return {}
+    if isinstance(token, str):
+        return {project.repo.full_name: token for project in projects}
+    missing = [
+        project.repo.full_name for project in projects if project.repo.full_name not in token
+    ]
+    if missing:
+        raise ValueError(f"Missing forge token for: {', '.join(missing)}")
+    return {project.repo.full_name: token[project.repo.full_name] for project in projects}
+
+
+def _key_parts(key: int | _ActiveKey, default: Config) -> _ActiveKey:
+    """Return the repository and issue number for an active-run key."""
+    if isinstance(key, tuple):
+        return key
+    return default.repo.full_name, key
+
+
+def _active_owner(
+    key: int | _ActiveKey,
+    projects: Sequence[Config],
+) -> tuple[Config, int]:
+    """Resolve the project and issue number that own an active run."""
+    repo, issue_number = _key_parts(key, projects[0])
+    for project in projects:
+        if project.repo.full_name == repo:
+            return project, issue_number
+    return projects[0], issue_number
+
+
+def run_daemon(
+    config: Config | Sequence[Config],
+    token: str | Mapping[str, str],
+) -> int:
+    """Poll every configured project for queued issues until interrupted.
 
     Args:
-        config: Orchestrator configuration.
-        token: GitHub token.
+        config: One project configuration or a sequence of them.
+        token: Forge token for a single project, or a mapping keyed by
+            ``owner/name`` when several projects are configured.
 
     Returns:
         Process exit code.
     """
+    projects = _projects(config)
+    tokens = _tokens(projects, token)
+    primary = projects[0]
     log.info(
-        "Daemon started for {} with {} worker slot(s)",
-        config.repo.full_name,
-        config.max_workers,
+        "Daemon started for {} project(s) with {} worker slot(s): {}",
+        len(projects),
+        primary.max_workers,
+        ", ".join(project.repo.full_name for project in projects),
     )
-    _reconcile_startup(config, token)
-    prune_runs(config.data_dir, config.retention_days)
-    store.prune_old_runs(config.data_dir / "orch.db", config.retention_days)
-    prune_workspaces(config, token)
-    db_path = config.data_dir / "orch.db"
-    active: dict[int, Future[RunOutcome]] = {}
-    poll_failed_at: float | None = None
+    _start_projects(projects, tokens)
+    db_path = primary.data_dir / "orch.db"
+    active: dict[int | _ActiveKey, Future[RunOutcome]] = {}
+    poll_failed_at: dict[str, float] = {}
 
     with ThreadPoolExecutor(
-        max_workers=config.max_workers,
+        max_workers=primary.max_workers,
         thread_name_prefix="orch",
     ) as executor:
         try:
             while True:
-                _reap_finished(active, config, token)
-
-                try:
-                    issues = github.list_ready_issues(
-                        config.repo.full_name,
-                        config.labels.queued,
-                        token,
+                _reap_finished(active, projects, tokens)
+                for project in projects:
+                    _poll_project(
+                        project,
+                        active,
+                        tokens,
+                        db_path,
+                        executor,
+                        poll_failed_at,
                     )
-                except GitHubError as ex:
-                    log.bind(error=ex, error_type=type(ex).__name__).error("Poll failed; retrying")
-                    now = time.monotonic()
-                    if poll_failed_at is None or now - poll_failed_at >= 1800:
-                        notify.notify_error(
-                            config,
-                            stage="daemon-poll",
-                            error=ex,
-                        )
-                        poll_failed_at = now
-                    time.sleep(config.poll_interval_seconds)
-                    continue
-
-                if poll_failed_at is not None:
-                    notify.notify_recovered(
-                        config,
-                        component="daemon-poll",
-                        detail="GitHub polling works again.",
-                    )
-                    poll_failed_at = None
-
-                _dispatch_issues(
-                    issues,
-                    active,
-                    config,
-                    token,
-                    db_path,
-                    executor,
-                )
-                time.sleep(config.poll_interval_seconds)
+                time.sleep(primary.poll_interval_seconds)
         except KeyboardInterrupt:
             log.info("Daemon stopping; waiting for active workers")
             return 0
 
 
+def _start_projects(projects: Sequence[Config], tokens: Mapping[str, str]) -> None:
+    """Reconcile interrupted runs and prune expired state per project."""
+    for project in projects:
+        _reconcile_startup(project, tokens[project.repo.full_name])
+    primary = projects[0]
+    prune_runs(primary.data_dir, primary.retention_days)
+    store.prune_old_runs(primary.data_dir / "orch.db", primary.retention_days)
+    for project in projects:
+        prune_workspaces(project, tokens[project.repo.full_name])
+
+
+def _poll_project(
+    config: Config,
+    active: dict[int | _ActiveKey, Future[RunOutcome]],
+    tokens: Mapping[str, str],
+    db_path: Path,
+    executor: ThreadPoolExecutor,
+    poll_failed_at: dict[str, float],
+) -> None:
+    """Poll one project and dispatch its queued issues."""
+    repo = config.repo.full_name
+    token = tokens[repo]
+    try:
+        issues = forge.list_ready_issues(config, config.labels.queued, token)
+    except ForgeError as ex:
+        log.bind(repo=repo, error=ex, error_type=type(ex).__name__).error("Poll failed; retrying")
+        now = time.monotonic()
+        last = poll_failed_at.get(repo)
+        if last is None or now - last >= _CLAIM_NOTIFY_SECONDS:
+            notify.notify_error(config, stage="daemon-poll", error=ex)
+            poll_failed_at[repo] = now
+        return
+
+    if repo in poll_failed_at:
+        notify.notify_recovered(
+            config,
+            component="daemon-poll",
+            detail="Forge polling works again.",
+        )
+        del poll_failed_at[repo]
+
+    _dispatch_issues(issues, active, config, token, db_path, executor)
+
+
 def _dispatch_issues(
     issues: list[Issue],
-    active: dict[int, Future[RunOutcome]],
+    active: dict[int | _ActiveKey, Future[RunOutcome]],
     config: Config,
     token: str,
     db_path: Path,
     executor: ThreadPoolExecutor,
 ) -> None:
+    repo = config.repo.full_name
     for index, issue in enumerate(issues):
         if len(active) >= config.max_workers:
             break
-        if issue.number in active:
+        key = (repo, issue.number)
+        if key in active:
             continue
         if config.labels.hold in issue.labels:
-            log.bind(issue=issue.number).info("Issue is on human hold; skipping")
+            log.bind(repo=repo, issue=issue.number).info("Issue is on human hold; skipping")
             continue
-        if store.has_active_run(db_path, config.repo.full_name, issue.number):
+        if store.has_active_run(db_path, repo, issue.number):
             continue
         if not _claim_issue(config, issue, token):
             continue
-        log.info("Claiming issue #{}: {}", issue.number, issue.title)
+        log.info("Claiming {}#{}: {}", repo, issue.number, issue.title)
         notify.notify_accepted(
             config,
             issue.number,
@@ -240,7 +311,7 @@ def _dispatch_issues(
             queue=max(0, len(issues) - index - 1),
             active=len(active) + 1,
         )
-        active[issue.number] = executor.submit(
+        active[key] = executor.submit(
             run_issue,
             config,
             issue,
@@ -250,51 +321,96 @@ def _dispatch_issues(
 
 
 def _reap_finished(
-    active: dict[int, Future[RunOutcome]],
-    config: Config,
-    token: str | None = None,
+    active: dict[int | _ActiveKey, Future[RunOutcome]],
+    config: Config | Sequence[Config],
+    token: str | Mapping[str, str] | None = None,
 ) -> None:
+    projects = _projects(config)
+    tokens = _tokens(projects, token)
     finished = False
-    for issue_number, future in list(active.items()):
+    for key, future in list(active.items()):
         if not future.done():
             continue
-        outcome: RunOutcome | None = None
-        try:
-            outcome = future.result()
-        except Exception as ex:
-            log.bind(
-                issue=issue_number,
-                error=ex,
-                error_type=type(ex).__name__,
-            ).error("Unhandled issue worker failure")
-            notify.notify_error(
-                config,
-                stage="worker",
-                error=ex,
-                issue_number=issue_number,
-            )
-        else:
-            log.info(
-                "Issue #{} finished with status {}",
-                issue_number,
-                outcome.status,
-            )
-        del active[issue_number]
+        project, issue_number = _active_owner(key, projects)
+        outcome = _reap_future(project, issue_number, future)
+        del active[key]
         finished = True
         if outcome is not None:
             _notify_outcome(
-                config,
+                project,
                 issue_number,
                 outcome.issue_title,
                 outcome,
-                queue=_queue_size(config, token),
+                queue=_queue_size(project, tokens.get(project.repo.full_name)),
                 active=len(active),
             )
     if finished:
-        prune_runs(config.data_dir, config.retention_days)
-        store.prune_old_runs(config.data_dir / "orch.db", config.retention_days)
-        if token:
-            prune_workspaces(config, token, active_issues=set(active))
+        _prune_after_finish(active, projects, tokens)
+
+
+def _reap_future(
+    project: Config,
+    issue_number: int,
+    future: Future[RunOutcome],
+) -> RunOutcome | None:
+    """Read one finished future, reporting unhandled failures."""
+    try:
+        outcome = future.result()
+    except Exception as ex:
+        log.bind(
+            repo=project.repo.full_name,
+            issue=issue_number,
+            error=ex,
+            error_type=type(ex).__name__,
+        ).error("Unhandled issue worker failure")
+        notify.notify_error(
+            project,
+            stage="worker",
+            error=ex,
+            issue_number=issue_number,
+        )
+        return None
+    log.info(
+        "{}#{} finished with status {}",
+        project.repo.full_name,
+        issue_number,
+        outcome.status,
+    )
+    return outcome
+
+
+def _prune_after_finish(
+    active: dict[int | _ActiveKey, Future[RunOutcome]],
+    projects: Sequence[Config],
+    tokens: Mapping[str, str],
+) -> None:
+    """Prune expired artifacts after at least one run finished."""
+    primary = projects[0]
+    prune_runs(primary.data_dir, primary.retention_days)
+    store.prune_old_runs(primary.data_dir / "orch.db", primary.retention_days)
+    for project in projects:
+        project_token = tokens.get(project.repo.full_name)
+        if project_token is None:
+            continue
+        prune_workspaces(
+            project,
+            project_token,
+            active_issues=_active_issues(active, project, primary),
+        )
+
+
+def _active_issues(
+    active: dict[int | _ActiveKey, Future[RunOutcome]],
+    project: Config,
+    default: Config,
+) -> set[int]:
+    """Return the project's issue numbers that are still running."""
+    issues: set[int] = set()
+    for key in active:
+        repo, issue_number = _key_parts(key, default)
+        if repo == project.repo.full_name:
+            issues.add(issue_number)
+    return issues
 
 
 def _notify_outcome(
@@ -333,23 +449,23 @@ def _queue_size(config: Config, token: str | None) -> int:
         return 0
     try:
         return len(
-            github.list_ready_issues(
-                config.repo.full_name,
+            forge.list_ready_issues(
+                config,
                 config.labels.queued,
                 token,
             )
         )
-    except GitHubError as ex:
+    except ForgeError as ex:
         log.bind(error=ex, error_type=type(ex).__name__).warning(
             "Could not count queued issues for the notification"
         )
         return 0
 
 
-def _claim_issue(config: Config, issue: github.Issue, token: str) -> bool:
+def _claim_issue(config: Config, issue: Issue, token: str) -> bool:
     try:
-        github.edit_labels(
-            config.repo.full_name,
+        forge.edit_labels(
+            config,
             issue.number,
             token,
             add=(config.labels.running,),
@@ -359,14 +475,15 @@ def _claim_issue(config: Config, issue: github.Issue, token: str) -> bool:
                 config.labels.pr_open,
             ),
         )
-    except GitHubError as ex:
+    except ForgeError as ex:
         log.bind(
             issue=issue.number,
             error=ex,
             error_type=type(ex).__name__,
         ).error("Could not claim issue")
+        key = (config.repo.full_name, issue.number)
         now = time.monotonic()
-        last = _claim_notified_at.get(issue.number)
+        last = _claim_notified_at.get(key)
         if last is None or now - last >= _CLAIM_NOTIFY_SECONDS:
             notify.notify_error(
                 config,
@@ -375,10 +492,10 @@ def _claim_issue(config: Config, issue: github.Issue, token: str) -> bool:
                 issue_number=issue.number,
                 issue_title=issue.title,
             )
-            _claim_notified_at[issue.number] = now
+            _claim_notified_at[key] = now
         return False
     else:
-        _claim_notified_at.pop(issue.number, None)
+        _claim_notified_at.pop((config.repo.full_name, issue.number), None)
         return True
 
 
@@ -392,12 +509,12 @@ def _reconcile_startup(config: Config, token: str) -> None:
         log.warning("Marked {} interrupted run(s) as interrupted", interrupted)
 
     try:
-        issues = github.list_ready_issues(
-            config.repo.full_name,
+        issues = forge.list_ready_issues(
+            config,
             config.labels.running,
             token,
         )
-    except GitHubError as ex:
+    except ForgeError as ex:
         log.bind(error=ex, error_type=type(ex).__name__).warning(
             "Could not reconcile running issues"
         )
@@ -410,22 +527,22 @@ def _reconcile_startup(config: Config, token: str) -> None:
 
     for issue in issues:
         try:
-            github.comment_issue(
-                config.repo.full_name,
+            forge.comment_issue(
+                config,
                 issue.number,
                 token,
-                github.mark_bot_body(
+                forge.mark_bot_body(
                     "orch был перезапущен во время работы. Issue возвращена в очередь."
                 ),
             )
-            github.edit_labels(
-                config.repo.full_name,
+            forge.edit_labels(
+                config,
                 issue.number,
                 token,
                 add=(config.labels.queued,),
                 remove=(config.labels.running, config.labels.needs_human),
             )
-        except GitHubError as ex:
+        except ForgeError as ex:
             log.bind(
                 issue=issue.number,
                 error=ex,

@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from orch.exceptions.github import GitHubError
+from orch.exceptions.forge import ForgeError
 from orch.schemas.config.types import Config, LabelsConfig, RepoConfig, WorkerConfig
 from orch.services.retention import prune_runs
 from orch.services.retention import service as retention
@@ -99,9 +99,11 @@ def test_prune_workspaces_removes_an_expired_workspace_without_open_pr(
     _age_tree(workspace, 30)
     calls: list[tuple[str, set[int], str]] = []
     monkeypatch.setattr(
-        retention.github,
+        retention.forge,
         "open_pr_issue_numbers",
-        lambda repo, numbers, token: calls.append((repo, set(numbers), token))
+        lambda config, numbers, token: calls.append(
+            (config.repo.full_name, set(numbers), token)
+        )
         or set(),
     )
 
@@ -119,7 +121,7 @@ def test_prune_workspaces_keeps_a_workspace_with_an_open_pr(
     workspace = _workspace(tmp_path)
     _age_tree(workspace, 30)
     monkeypatch.setattr(
-        retention.github,
+        retention.forge,
         "open_pr_issue_numbers",
         lambda *_args: {7},
     )
@@ -134,7 +136,7 @@ def test_prune_workspaces_keeps_a_fresh_workspace_without_a_lookup(
 ) -> None:
     workspace = _workspace(tmp_path)
     monkeypatch.setattr(
-        retention.github,
+        retention.forge,
         "open_pr_issue_numbers",
         lambda *_args: pytest.fail("fresh workspaces must not trigger a lookup"),
     )
@@ -150,7 +152,7 @@ def test_prune_workspaces_keeps_a_workspace_with_an_active_run(
     workspace = _workspace(tmp_path)
     _age_tree(workspace, 30)
     monkeypatch.setattr(
-        retention.github,
+        retention.forge,
         "open_pr_issue_numbers",
         lambda *_args: pytest.fail("active workspaces must not be looked up"),
     )
@@ -173,9 +175,9 @@ def test_prune_workspaces_keeps_everything_when_the_lookup_fails(
     _age_tree(workspace, 30)
 
     def fail(*_args: object) -> set[int]:
-        raise GitHubError("offline")
+        raise ForgeError("offline")
 
-    monkeypatch.setattr(retention.github, "open_pr_issue_numbers", fail)
+    monkeypatch.setattr(retention.forge, "open_pr_issue_numbers", fail)
 
     assert retention.prune_workspaces(_config(tmp_path), "token") == 0
     assert workspace.exists()
@@ -192,7 +194,7 @@ def test_prune_workspaces_uses_the_newest_file_in_the_tree(
     _age_tree(workspace, 30)
     os.utime(fresh, None)
     monkeypatch.setattr(
-        retention.github,
+        retention.forge,
         "open_pr_issue_numbers",
         lambda *_args: pytest.fail("fresh files must keep the workspace"),
     )
@@ -211,7 +213,7 @@ def test_prune_workspaces_ignores_unrelated_entries(
     (root / "issue-x").mkdir()
     (root / "issue-0").mkdir()
     monkeypatch.setattr(
-        retention.github,
+        retention.forge,
         "open_pr_issue_numbers",
         lambda *_args: pytest.fail("no workspace candidates were expected"),
     )
@@ -237,7 +239,7 @@ def test_prune_workspaces_can_select_multiple_issues(
         seen.append(set(numbers))
         return {7}
 
-    monkeypatch.setattr(retention.github, "open_pr_issue_numbers", lookup)
+    monkeypatch.setattr(retention.forge, "open_pr_issue_numbers", lookup)
 
     assert retention.prune_workspaces(_config(tmp_path), "token") == 1
     assert first.exists()
@@ -252,7 +254,7 @@ def test_prune_workspaces_respects_the_configured_window(
     workspace = _workspace(tmp_path)
     _age_tree(workspace, 10)
     monkeypatch.setattr(
-        retention.github,
+        retention.forge,
         "open_pr_issue_numbers",
         lambda *_args: pytest.fail("ten-day workspace is fresh at 14 days"),
     )

@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from orch.config.settings import load_config
+from orch.config.settings import load_config, load_projects
 from orch.exceptions.config import ConfigError
 from orch.schemas.config.types import Config
 
@@ -930,3 +930,385 @@ worker:
 
     with pytest.raises(ConfigError):
         load_config(config_path)
+
+
+def test_load_config_defaults_to_github(tmp_path: Path) -> None:
+    repo_path = tmp_path / "repo"
+    (repo_path / ".git").mkdir(parents=True)
+    config_path = _write_config(
+        tmp_path,
+        f"""
+repo:
+  owner: slaid098
+  name: orch
+  path: {repo_path.as_posix()}
+worker:
+  test_commands:
+    - pytest
+""",
+    )
+
+    config = load_config(config_path)
+
+    assert config.repo.forge == "github"
+    assert config.repo.url == ""
+
+
+def test_load_config_reads_a_forgejo_repository(tmp_path: Path) -> None:
+    repo_path = tmp_path / "repo"
+    (repo_path / ".git").mkdir(parents=True)
+    config_path = _write_config(
+        tmp_path,
+        f"""
+repo:
+  owner: slaid098
+  name: orch
+  path: {repo_path.as_posix()}
+  forge: forgejo
+  url: https://git.example.test/
+worker:
+  test_commands:
+    - pytest
+""",
+    )
+
+    config = load_config(config_path)
+
+    assert config.repo.forge == "forgejo"
+    assert config.repo.url == "https://git.example.test"
+
+
+def test_load_config_requires_a_forgejo_url(tmp_path: Path) -> None:
+    repo_path = tmp_path / "repo"
+    (repo_path / ".git").mkdir(parents=True)
+    config_path = _write_config(
+        tmp_path,
+        f"""
+repo:
+  owner: slaid098
+  name: orch
+  path: {repo_path.as_posix()}
+  forge: forgejo
+worker:
+  test_commands:
+    - pytest
+""",
+    )
+
+    with pytest.raises(ConfigError, match="repo.url"):
+        load_config(config_path)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "ftp://git.example.test",
+        "https://user:pass@git.example.test",
+        "https://git.example.test?x=1",
+        "https://git.example.test#fragment",
+        "not-a-url",
+    ],
+)
+def test_load_config_rejects_an_invalid_forgejo_url(
+    tmp_path: Path,
+    url: str,
+) -> None:
+    repo_path = tmp_path / "repo"
+    (repo_path / ".git").mkdir(parents=True)
+    config_path = _write_config(
+        tmp_path,
+        f"""
+repo:
+  owner: slaid098
+  name: orch
+  path: {repo_path.as_posix()}
+  forge: forgejo
+  url: {url}
+worker:
+  test_commands:
+    - pytest
+""",
+    )
+
+    with pytest.raises(ConfigError, match="repo.url"):
+        load_config(config_path)
+
+
+def test_load_config_rejects_an_unknown_forge(tmp_path: Path) -> None:
+    repo_path = tmp_path / "repo"
+    (repo_path / ".git").mkdir(parents=True)
+    config_path = _write_config(
+        tmp_path,
+        f"""
+repo:
+  owner: slaid098
+  name: orch
+  path: {repo_path.as_posix()}
+  forge: gitlab
+worker:
+  test_commands:
+    - pytest
+""",
+    )
+
+    with pytest.raises(ConfigError, match="repo.forge"):
+        load_config(config_path)
+
+
+def test_load_config_resolves_the_forgejo_token(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_path = tmp_path / "repo"
+    (repo_path / ".git").mkdir(parents=True)
+    monkeypatch.setenv("FORGEJO_TOKEN", " explicit ")
+    monkeypatch.delenv("ORCH_FORGEJO_TOKEN", raising=False)
+    config_path = _write_config(
+        tmp_path,
+        f"""
+repo:
+  owner: slaid098
+  name: orch
+  path: {repo_path.as_posix()}
+worker:
+  test_commands:
+    - pytest
+""",
+    )
+
+    config = load_config(config_path)
+
+    assert config.forgejo_token == "explicit"
+
+
+def test_load_config_prefers_the_orch_forgejo_token(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_path = tmp_path / "repo"
+    (repo_path / ".git").mkdir(parents=True)
+    monkeypatch.setenv("FORGEJO_TOKEN", "fallback")
+    monkeypatch.setenv("ORCH_FORGEJO_TOKEN", " explicit ")
+    config_path = _write_config(
+        tmp_path,
+        f"""
+repo:
+  owner: slaid098
+  name: orch
+  path: {repo_path.as_posix()}
+worker:
+  test_commands:
+    - pytest
+""",
+    )
+
+    config = load_config(config_path)
+
+    assert config.forgejo_token == "explicit"
+
+
+def test_load_projects_merges_shared_defaults(tmp_path: Path) -> None:
+    first_repo = tmp_path / "first"
+    second_repo = tmp_path / "second"
+    (first_repo / ".git").mkdir(parents=True)
+    (second_repo / ".git").mkdir(parents=True)
+    config_path = _write_config(
+        tmp_path,
+        f"""
+data_dir: data
+worker:
+  test_commands:
+    - uv run pytest -q
+  timeout_minutes: 45
+labels:
+  queued: shared:queued
+projects:
+  - name: first
+    repo:
+      owner: slaid098
+      name: first
+      path: {first_repo.as_posix()}
+  - name: second
+    repo:
+      owner: slaid098
+      name: second
+      path: {second_repo.as_posix()}
+    labels:
+      queued: second:queued
+    worker:
+      test_commands:
+        - uv run pytest tests -q
+""",
+    )
+
+    projects = load_projects(config_path)
+
+    assert [project.name for project in projects] == ["first", "second"]
+    assert [project.repo.full_name for project in projects] == [
+        "slaid098/first",
+        "slaid098/second",
+    ]
+    assert projects[0].data_dir == projects[1].data_dir == (tmp_path / "data").resolve()
+    assert projects[0].worker.timeout_minutes == 45
+    assert projects[1].worker.timeout_minutes == 45
+    assert projects[0].worker.test_commands == ("uv run pytest -q",)
+    assert projects[1].worker.test_commands == ("uv run pytest tests -q",)
+    assert projects[0].labels.queued == "shared:queued"
+    assert projects[1].labels.queued == "second:queued"
+
+
+def test_load_config_returns_the_first_project(tmp_path: Path) -> None:
+    first_repo = tmp_path / "first"
+    second_repo = tmp_path / "second"
+    (first_repo / ".git").mkdir(parents=True)
+    (second_repo / ".git").mkdir(parents=True)
+    config_path = _write_config(
+        tmp_path,
+        f"""
+worker:
+  test_commands:
+    - pytest
+projects:
+  - repo:
+      owner: slaid098
+      name: first
+      path: {first_repo.as_posix()}
+  - repo:
+      owner: slaid098
+      name: second
+      path: {second_repo.as_posix()}
+""",
+    )
+
+    assert load_config(config_path).repo.full_name == "slaid098/first"
+
+
+def test_load_projects_rejects_a_top_level_repo(tmp_path: Path) -> None:
+    config_path = _write_config(
+        tmp_path,
+        """
+repo:
+  owner: slaid098
+  name: orch
+  path: repo
+worker:
+  test_commands:
+    - pytest
+projects:
+  - repo:
+      owner: slaid098
+      name: orch
+      path: repo
+""",
+    )
+
+    with pytest.raises(ConfigError, match="repo must be defined inside"):
+        load_projects(config_path)
+
+
+def test_load_projects_requires_a_repo_per_project(tmp_path: Path) -> None:
+    config_path = _write_config(
+        tmp_path,
+        """
+worker:
+  test_commands:
+    - pytest
+projects:
+  - name: broken
+""",
+    )
+
+    with pytest.raises(ConfigError, match=r"projects\[1\]\.repo is required"):
+        load_projects(config_path)
+
+
+def test_load_projects_rejects_an_empty_list(tmp_path: Path) -> None:
+    config_path = _write_config(
+        tmp_path,
+        """
+worker:
+  test_commands:
+    - pytest
+projects: []
+""",
+    )
+
+    with pytest.raises(ConfigError, match="non-empty list"):
+        load_projects(config_path)
+
+
+def test_load_projects_rejects_duplicate_repositories(tmp_path: Path) -> None:
+    repo_path = tmp_path / "repo"
+    (repo_path / ".git").mkdir(parents=True)
+    config_path = _write_config(
+        tmp_path,
+        f"""
+worker:
+  test_commands:
+    - pytest
+projects:
+  - repo:
+      owner: slaid098
+      name: orch
+      path: {repo_path.as_posix()}
+  - name: second
+    repo:
+      owner: slaid098
+      name: orch
+      path: {repo_path.as_posix()}
+""",
+    )
+
+    with pytest.raises(ConfigError, match="Duplicate project repository"):
+        load_projects(config_path)
+
+
+def test_load_projects_rejects_duplicate_names(tmp_path: Path) -> None:
+    first_repo = tmp_path / "first"
+    second_repo = tmp_path / "second"
+    (first_repo / ".git").mkdir(parents=True)
+    (second_repo / ".git").mkdir(parents=True)
+    config_path = _write_config(
+        tmp_path,
+        f"""
+worker:
+  test_commands:
+    - pytest
+projects:
+  - name: same
+    repo:
+      owner: slaid098
+      name: first
+      path: {first_repo.as_posix()}
+  - name: same
+    repo:
+      owner: slaid098
+      name: second
+      path: {second_repo.as_posix()}
+""",
+    )
+
+    with pytest.raises(ConfigError, match="Duplicate project name"):
+        load_projects(config_path)
+
+
+def test_load_projects_rejects_global_overrides(tmp_path: Path) -> None:
+    repo_path = tmp_path / "repo"
+    (repo_path / ".git").mkdir(parents=True)
+    config_path = _write_config(
+        tmp_path,
+        f"""
+worker:
+  test_commands:
+    - pytest
+projects:
+  - repo:
+      owner: slaid098
+      name: orch
+      path: {repo_path.as_posix()}
+    data_dir: per-project
+""",
+    )
+
+    with pytest.raises(ConfigError, match="global setting"):
+        load_projects(config_path)

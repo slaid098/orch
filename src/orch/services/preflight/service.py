@@ -8,9 +8,9 @@ import subprocess
 
 from orch.config.logger import get_logger
 from orch.exceptions.docker import DockerError
-from orch.exceptions.github import GitHubError
+from orch.exceptions.forge import ForgeError
 from orch.schemas.config.types import Config
-from orch.services import docker, github
+from orch.services import docker, forge, skills
 
 log = get_logger(component="preflight")
 
@@ -24,8 +24,8 @@ def check(config: Config) -> list[str]:
     """Return every startup problem without mutating remote state.
 
     Checks the Docker daemon and required images, the local model endpoint,
-    GitHub authentication and repository access, the base branch, and free
-    disk space.
+    forge authentication and repository access, configured skills, the base
+    branch, and free disk space.
 
     Args:
         config: Orchestrator configuration.
@@ -36,7 +36,8 @@ def check(config: Config) -> list[str]:
     problems: list[str] = []
     _check_docker(config, problems)
     _check_model_endpoint(problems)
-    _check_github(config, problems)
+    _check_forge(config, problems)
+    _check_skills(config, problems)
     _check_base_branch(config, problems)
     _check_disk(config, problems)
     return problems
@@ -82,14 +83,19 @@ def _check_model_endpoint(problems: list[str]) -> None:
         )
 
 
-def _check_github(config: Config, problems: list[str]) -> None:
+def _check_forge(config: Config, problems: list[str]) -> None:
     """Check the token owner and repository access."""
     try:
-        token = github.resolve_token(config.repo.owner, config.gh_token)
-        github.ensure_user(token, config.repo.owner)
-        github.check_repo(config.repo.full_name, token)
-    except GitHubError as ex:
-        problems.append(f"GitHub: {ex}")
+        token = forge.resolve_token(config)
+        forge.ensure_user(config, token)
+        forge.check_repo(config, token)
+    except ForgeError as ex:
+        problems.append(f"Forge: {ex}")
+
+
+def _check_skills(config: Config, problems: list[str]) -> None:
+    """Check that every skill named in the configuration is resolvable."""
+    problems.extend(skills.check(config))
 
 
 def _check_base_branch(config: Config, problems: list[str]) -> None:

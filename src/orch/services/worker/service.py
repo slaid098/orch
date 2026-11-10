@@ -14,7 +14,7 @@ from orch.exceptions.worker import AgentError, RunCancelled, WatchdogStop
 from orch.schemas.config.types import Config
 from orch.schemas.github.types import Issue
 from orch.schemas.worker.types import WorkerResult
-from orch.services import mcp
+from orch.services import mcp, skills
 from orch.services.docker import exec_in, start_worker, stop
 from orch.services.feedback.service import CommentFeed
 from orch.services.standards import load_handoff
@@ -157,6 +157,7 @@ def run_worker(
     container = _container_name(run_dir)
     deadline = time.monotonic() + timeout_seconds
     base_sha: str | None = None
+    skill_mounts = skills.resolve(config, config.worker.skills)
     start_worker(
         image=config.worker.image,
         name=container,
@@ -165,6 +166,7 @@ def run_worker(
         run_dir=run_dir,
         model=config.worker.model,
         context_tokens=claude.autocompact_tokens(config.worker.autocompact),
+        skills=skill_mounts,
     )
 
     try:

@@ -1,5 +1,7 @@
 """GitHub exceptions."""
 
+from orch.exceptions.forge import ForgeError
 
-class GitHubError(RuntimeError):
-    """Raised when a GitHub CLI command fails."""
+
+class GitHubError(ForgeError):
+    """Raised when a GitHub CLI operation fails."""

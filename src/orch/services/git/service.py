@@ -8,40 +8,34 @@ import stat
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
+from urllib.parse import quote, urlparse
 
 from orch.config.logger import get_logger
 from orch.exceptions.git import GitError
+from orch.schemas.config.types import Config
 
 log = get_logger(component="git")
 
 
-def refresh_mirror(
-    data_dir: Path,
-    owner: str,
-    name: str,
-    base_branch: str,
-    token: str,
-) -> Path:
+def refresh_mirror(config: Config, token: str) -> Path:
     """Fetch the latest base branch into a persistent bare mirror.
 
     Args:
-        data_dir: Local orch data directory.
-        owner: Repository owner.
-        name: Repository name.
-        base_branch: Branch the worker should start from.
-        token: GitHub token used only for the fetch URL.
+        config: Orchestrator configuration.
+        token: Forge token used only for the fetch URL.
 
     Returns:
         Path to the bare mirror.
     """
-    mirror = data_dir / "mirrors" / f"{owner}__{name}.git"
+    repo = config.repo
+    mirror = config.data_dir / "mirrors" / f"{repo.owner}__{repo.name}.git"
     mirror.parent.mkdir(parents=True, exist_ok=True)
     if not (mirror / "HEAD").exists():
         _run_git(["init", "--bare", str(mirror)], cwd=mirror.parent)
 
-    base_ref = f"refs/heads/{base_branch}"
+    base_ref = f"refs/heads/{repo.base_branch}"
     _run_git(["--git-dir", str(mirror), "symbolic-ref", "HEAD", base_ref], cwd=mirror)
-    remote = authenticated_remote(owner, name, token)
+    remote = authenticated_remote(config, token)
     env = os.environ.copy()
     env["GIT_TERMINAL_PROMPT"] = "0"
     env["GH_PROMPT_DISABLED"] = "1"
@@ -59,7 +53,7 @@ def refresh_mirror(
         secret=token,
     )
     _run_git(["--git-dir", str(mirror), "rev-parse", base_ref], cwd=mirror)
-    log.info("Refreshed source mirror to {}/{}", owner, name)
+    log.info("Refreshed source mirror to {}/{}", repo.owner, repo.name)
     return mirror
 
 
@@ -67,7 +61,7 @@ def clone_source(mirror: Path, base_branch: str, destination: Path) -> Path:
     """Create a disposable source checkout for one issue run.
 
     The copy is made from the local mirror; the worker never receives a
-    GitHub token. It is cloned once per issue, not once per retry.
+    forge token. It is cloned once per issue, not once per retry.
     """
     if destination.exists():
         _remove_tree(destination)
@@ -190,13 +184,13 @@ def push_branch(
     *,
     expected: str | None = None,
 ) -> None:
-    """Push a branch from a bare repository to GitHub.
+    """Push a branch from a bare repository to the configured forge.
 
     Args:
         bare: Bare repository created by :func:`import_bundle`.
         branch: Branch name to push.
-        remote_url: Authenticated or unauthenticated GitHub remote URL.
-        token: GitHub token used for redaction in error messages.
+        remote_url: Authenticated or unauthenticated forge remote URL.
+        token: Forge token used for redaction in error messages.
         expected: When set, require the remote branch to still point at this
             commit via ``--force-with-lease`` before replacing it.
     """
@@ -222,7 +216,7 @@ def push_branch(
     except GitError as ex:
         raise GitError(f"Could not push branch {branch}") from ex
     else:
-        log.info("Pushed branch {} to GitHub", branch)
+        log.info("Pushed branch {} to the remote", branch)
 
 
 def branch_sha(bare: Path, branch: str) -> str:
@@ -233,9 +227,19 @@ def branch_sha(bare: Path, branch: str) -> str:
     ).strip()
 
 
-def authenticated_remote(owner: str, name: str, token: str) -> str:
-    """Build an HTTPS remote URL containing a GitHub token."""
-    return f"https://x-access-token:{token}@github.com/{owner}/{name}.git"
+def authenticated_remote(config: Config, token: str) -> str:
+    """Build an HTTPS remote URL containing a forge token."""
+    repo = config.repo
+    if repo.forge == "forgejo":
+        parsed = urlparse(repo.url)
+        prefix = parsed.path.rstrip("/")
+        user = quote(repo.owner, safe="")
+        secret = quote(token, safe="")
+        return (
+            f"https://{user}:{secret}@{parsed.netloc}{prefix}"
+            f"/{repo.owner}/{repo.name}.git"
+        )
+    return f"https://x-access-token:{token}@github.com/{repo.owner}/{repo.name}.git"
 
 
 def _run_git(

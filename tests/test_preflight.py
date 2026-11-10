@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from orch.exceptions.docker import DockerError
-from orch.exceptions.github import GitHubError
+from orch.exceptions.forge import ForgeError
 from orch.schemas.config.types import (
     Config,
     LabelsConfig,
@@ -24,14 +24,20 @@ def _config(
     *,
     reviewer: bool = True,
     min_free_disk_gb: int = 1,
+    worker_skills: tuple[str, ...] = (),
 ) -> Config:
     repo = tmp_path / "repo"
     (repo / ".git").mkdir(parents=True)
     return Config(
         repo=RepoConfig(owner="slaid098", name="orch", path=repo),
         labels=LabelsConfig(),
-        worker=WorkerConfig(image="worker:latest", test_commands=("pytest",)),
+        worker=WorkerConfig(
+            image="worker:latest",
+            test_commands=("pytest",),
+            skills=worker_skills,
+        ),
         data_dir=tmp_path / "data",
+        skills_dir=tmp_path / "skills",
         min_free_disk_gb=min_free_disk_gb,
         reviewer=ReviewerConfig(enabled=reviewer, image="reviewer:latest"),
     )
@@ -50,7 +56,7 @@ def _pass_dependencies(
     *,
     images: set[str] | None = None,
     model_ok: bool = True,
-    github_error: Exception | None = None,
+    forge_error: Exception | None = None,
     base_branch: bool = True,
     free_bytes: int = 10 * 1024**3,
 ) -> None:
@@ -73,19 +79,19 @@ def _pass_dependencies(
         lambda _path: SimpleNamespace(free=free_bytes),
     )
 
-    if github_error is None:
+    if forge_error is None:
         monkeypatch.setattr(
-            preflight.github,
+            preflight.forge,
             "resolve_token",
             lambda *_args: "token",
         )
-        monkeypatch.setattr(preflight.github, "ensure_user", lambda *_args: None)
-        monkeypatch.setattr(preflight.github, "check_repo", lambda *_args: None)
+        monkeypatch.setattr(preflight.forge, "ensure_user", lambda *_args: None)
+        monkeypatch.setattr(preflight.forge, "check_repo", lambda *_args: None)
     else:
         def fail(*_args: object) -> str:
-            raise github_error
+            raise forge_error
 
-        monkeypatch.setattr(preflight.github, "resolve_token", fail)
+        monkeypatch.setattr(preflight.forge, "resolve_token", fail)
 
     def connect(*_args: object, **_kwargs: object) -> _Connection:
         if not model_ok:
@@ -111,7 +117,7 @@ def test_check_reports_every_independent_problem(
     _pass_dependencies(
         monkeypatch,
         model_ok=False,
-        github_error=GitHubError("no token"),
+        forge_error=ForgeError("no token"),
         base_branch=False,
         free_bytes=0,
     )
@@ -122,7 +128,7 @@ def test_check_reports_every_independent_problem(
     assert len(problems) == 5
     assert any("Docker daemon is not reachable" in problem for problem in problems)
     assert any("Model endpoint 127.0.0.1:11434" in problem for problem in problems)
-    assert any("GitHub: no token" in problem for problem in problems)
+    assert any("Forge: no token" in problem for problem in problems)
     assert any("Base branch 'main' is missing" in problem for problem in problems)
     assert any("Only 0.0 GB free" in problem for problem in problems)
 
@@ -138,6 +144,20 @@ def test_check_reports_missing_worker_and_reviewer_images(
     assert len(problems) == 2
     assert any("Worker image 'worker:latest'" in problem for problem in problems)
     assert any("Reviewer image 'reviewer:latest'" in problem for problem in problems)
+
+
+def test_check_reports_a_missing_skill(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _pass_dependencies(monkeypatch)
+
+    problems = preflight.check(_config(tmp_path, worker_skills=("missing",)))
+
+    assert problems == [
+        "Worker: Skill 'missing' is missing: no SKILL.md under "
+        f"{tmp_path / 'skills'}"
+    ]
 
 
 def test_check_skips_the_reviewer_image_when_disabled(

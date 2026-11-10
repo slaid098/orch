@@ -8,12 +8,12 @@ import threading
 from pathlib import Path
 
 from orch.config.logger import get_logger
-from orch.exceptions.github import GitHubError
+from orch.constants.standards import BOT_MARKER
+from orch.exceptions.forge import ForgeError
 from orch.schemas.config.types import Config
 from orch.schemas.feedback.types import IncomingComment
 from orch.schemas.github.types import Comment, Issue
-from orch.services import github
-from orch.services.github.service import BOT_MARKER
+from orch.services import forge
 
 log = get_logger(component="feedback")
 
@@ -128,12 +128,12 @@ class CommentFeed:
                 findings and terminal failure context for a revision.
         """
         try:
-            comments = github.list_issue_comments(
-                self._config.repo.full_name,
+            comments = forge.list_issue_comments(
+                self._config,
                 self._issue.number,
                 self._token,
             )
-        except GitHubError as ex:
+        except ForgeError as ex:
             log.bind(
                 issue=self._issue.number,
                 error=ex,
@@ -187,12 +187,12 @@ class CommentFeed:
         if self._cancelled.is_set():
             return
         try:
-            is_open = github.issue_is_open(
-                self._config.repo.full_name,
+            is_open = forge.issue_is_open(
+                self._config,
                 self._issue.number,
                 self._token,
             )
-        except GitHubError as ex:
+        except ForgeError as ex:
             log.bind(
                 issue=self._issue.number,
                 error=ex,
@@ -204,13 +204,13 @@ class CommentFeed:
                 return
 
         try:
-            comments = github.list_issue_comments(
-                self._config.repo.full_name,
+            comments = forge.list_issue_comments(
+                self._config,
                 self._issue.number,
                 self._token,
                 since=self._since,
             )
-        except GitHubError as ex:
+        except ForgeError as ex:
             log.bind(
                 issue=self._issue.number,
                 error=ex,

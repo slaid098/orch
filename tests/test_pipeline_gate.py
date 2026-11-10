@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from orch.exceptions.github import GitHubError
+from orch.exceptions.forge import ForgeError
 from orch.exceptions.pipeline import ChecksFailed
 from orch.exceptions.reviewer import ReviewerError
 from orch.exceptions.worker import RunCancelled
@@ -147,27 +147,27 @@ def _prepare(
     )
     monkeypatch.setattr(publish, "_publish_branch", lambda *_args: None)
     monkeypatch.setattr(
-        pipeline.github,
+        pipeline.forge,
         "find_open_pr_for_issue",
         lambda *_args, **_kwargs: None,
     )
-    monkeypatch.setattr(pipeline.github, "find_open_pr", lambda *_args: None)
-    monkeypatch.setattr(pipeline.github, "issue_is_open", lambda *_args: True)
-    monkeypatch.setattr(pipeline.github, "delete_branch", lambda *_args: None)
+    monkeypatch.setattr(pipeline.forge, "find_open_pr", lambda *_args: None)
+    monkeypatch.setattr(pipeline.forge, "issue_is_open", lambda *_args: True)
+    monkeypatch.setattr(pipeline.forge, "delete_branch", lambda *_args: None)
     monkeypatch.setattr(
-        pipeline.github,
+        pipeline.forge,
         "comment_issue",
         lambda _repo, _number, _token, body: events["comments"].append(body),
     )
     monkeypatch.setattr(
-        pipeline.github,
+        pipeline.forge,
         "edit_labels",
         lambda _repo, _number, _token, *, add, remove: events["labels"].append(
             (add, remove)
         ),
     )
     monkeypatch.setattr(
-        pipeline.github,
+        pipeline.forge,
         "create_pr",
         lambda _repo, _token, **kwargs: (
             events["prs"].append(kwargs)
@@ -212,7 +212,7 @@ def _prepare(
 
     monkeypatch.setattr(pipeline, "_wait_for_checks", fake_checks)
     monkeypatch.setattr(gate, "run_review", fake_review)
-    monkeypatch.setattr(pipeline.github, "merge_pr", fake_merge)
+    monkeypatch.setattr(pipeline.forge, "merge_pr", fake_merge)
     monkeypatch.setattr(pipeline, "run_worker", fake_worker)
     return events
 
@@ -529,9 +529,9 @@ def test_merge_failure_parks_with_pr_url(
     events = _prepare(tmp_path, monkeypatch)
 
     def fail_merge(*_args: object) -> str:
-        raise GitHubError("branch protection")
+        raise ForgeError("branch protection")
 
-    monkeypatch.setattr(pipeline.github, "merge_pr", fail_merge)
+    monkeypatch.setattr(pipeline.forge, "merge_pr", fail_merge)
 
     outcome = pipeline.run_issue(
         config,
@@ -598,9 +598,9 @@ def test_wait_for_checks_returns_green_summary(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config = _config(tmp_path)
-    monkeypatch.setattr(pipeline.github, "issue_is_open", lambda *_args: True)
+    monkeypatch.setattr(pipeline.forge, "issue_is_open", lambda *_args: True)
     monkeypatch.setattr(
-        pipeline.github,
+        pipeline.forge,
         "get_pr_status",
         lambda *_args: _status(CheckResult("pytest", "success")),
     )
@@ -627,9 +627,9 @@ def test_wait_for_checks_waits_for_pending(
             _status(CheckResult("pytest", "success")),
         ]
     )
-    monkeypatch.setattr(pipeline.github, "issue_is_open", lambda *_args: True)
+    monkeypatch.setattr(pipeline.forge, "issue_is_open", lambda *_args: True)
     monkeypatch.setattr(
-        pipeline.github,
+        pipeline.forge,
         "get_pr_status",
         lambda *_args: next(statuses),
     )
@@ -663,8 +663,8 @@ def test_wait_for_checks_ignores_another_commit(
         calls.append(1)
         return next(statuses)
 
-    monkeypatch.setattr(pipeline.github, "issue_is_open", lambda *_args: True)
-    monkeypatch.setattr(pipeline.github, "get_pr_status", status)
+    monkeypatch.setattr(pipeline.forge, "issue_is_open", lambda *_args: True)
+    monkeypatch.setattr(pipeline.forge, "get_pr_status", status)
     monkeypatch.setattr(pipeline.time, "sleep", lambda _seconds: None)
 
     summary = pipeline._wait_for_checks(
@@ -685,9 +685,9 @@ def test_wait_for_checks_raises_on_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config = _config(tmp_path)
-    monkeypatch.setattr(pipeline.github, "issue_is_open", lambda *_args: True)
+    monkeypatch.setattr(pipeline.forge, "issue_is_open", lambda *_args: True)
     monkeypatch.setattr(
-        pipeline.github,
+        pipeline.forge,
         "get_pr_status",
         lambda *_args: _status(CheckResult("pytest", "failure")),
     )
@@ -707,9 +707,9 @@ def test_wait_for_checks_treats_conflicts_as_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config = _config(tmp_path)
-    monkeypatch.setattr(pipeline.github, "issue_is_open", lambda *_args: True)
+    monkeypatch.setattr(pipeline.forge, "issue_is_open", lambda *_args: True)
     monkeypatch.setattr(
-        pipeline.github,
+        pipeline.forge,
         "get_pr_status",
         lambda *_args: _status(
             CheckResult("pytest", "success"),
@@ -742,9 +742,9 @@ def test_wait_for_checks_accepts_no_checks_after_discovery(
             discovery_seconds=0,
         ),
     )
-    monkeypatch.setattr(pipeline.github, "issue_is_open", lambda *_args: True)
+    monkeypatch.setattr(pipeline.forge, "issue_is_open", lambda *_args: True)
     monkeypatch.setattr(
-        pipeline.github,
+        pipeline.forge,
         "get_pr_status",
         lambda *_args: _status(),
     )
@@ -757,7 +757,7 @@ def test_wait_for_checks_accepts_no_checks_after_discovery(
         None,
     )
 
-    assert "No GitHub checks" in summary
+    assert "No CI checks" in summary
 
 
 def test_wait_for_checks_times_out(
@@ -775,9 +775,9 @@ def test_wait_for_checks_times_out(
             discovery_seconds=10,
         ),
     )
-    monkeypatch.setattr(pipeline.github, "issue_is_open", lambda *_args: True)
+    monkeypatch.setattr(pipeline.forge, "issue_is_open", lambda *_args: True)
     monkeypatch.setattr(
-        pipeline.github,
+        pipeline.forge,
         "get_pr_status",
         lambda *_args: _status(CheckResult("pytest", "pending")),
     )
@@ -792,7 +792,7 @@ def test_wait_for_checks_times_out(
         )
 
 
-def test_wait_for_checks_times_out_when_github_fails(
+def test_wait_for_checks_times_out_when_the_forge_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -807,12 +807,12 @@ def test_wait_for_checks_times_out_when_github_fails(
             discovery_seconds=10,
         ),
     )
-    monkeypatch.setattr(pipeline.github, "issue_is_open", lambda *_args: True)
+    monkeypatch.setattr(pipeline.forge, "issue_is_open", lambda *_args: True)
 
     def fail(*_args: object) -> PullRequestStatus:
-        raise GitHubError("api down")
+        raise ForgeError("api down")
 
-    monkeypatch.setattr(pipeline.github, "get_pr_status", fail)
+    monkeypatch.setattr(pipeline.forge, "get_pr_status", fail)
 
     with pytest.raises(ChecksFailed, match="Could not read"):
         pipeline._wait_for_checks(
@@ -829,7 +829,7 @@ def test_wait_for_checks_cancels_on_closed_issue(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config = _config(tmp_path)
-    monkeypatch.setattr(pipeline.github, "issue_is_open", lambda *_args: False)
+    monkeypatch.setattr(pipeline.forge, "issue_is_open", lambda *_args: False)
 
     with pytest.raises(RunCancelled, match="issue closed"):
         pipeline._wait_for_checks(
