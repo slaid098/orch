@@ -27,6 +27,10 @@ _GIT_ENV = (
     "export GIT_CONFIG_GLOBAL=/out/gitconfig; git config --global --add safe.directory /work; "
 )
 _CHECKPOINT_SECONDS = 120
+# Finalization (commit, diff, codegraph, bundle) runs after the verification
+# gate, whose budget is independent from the agent. The agent deadline may
+# already be in the past by then, so those steps get a fresh, small budget.
+_FINALIZE_SECONDS = 600
 _TESTS_TAIL_CHARS = 6000
 
 
@@ -252,10 +256,11 @@ def _complete_attempt(
     _ensure_changes(container, head_before, deadline)
     handoff = load_handoff(run_dir)
     tests_output = _run_tests(container, config, run_dir)
-    _finalize_commit(container, base_sha, issue.title, run_dir, deadline)
-    _write_diff(container, base_sha, run_dir, deadline)
-    _prepare_codegraph(container, config, deadline)
-    bundle = _bundle(container, branch, run_dir, deadline)
+    finalize_deadline = time.monotonic() + _FINALIZE_SECONDS
+    _finalize_commit(container, base_sha, issue.title, run_dir, finalize_deadline)
+    _write_diff(container, base_sha, run_dir, finalize_deadline)
+    _prepare_codegraph(container, config, finalize_deadline)
+    bundle = _bundle(container, branch, run_dir, finalize_deadline)
     return WorkerResult(
         run_dir=run_dir,
         branch=branch,

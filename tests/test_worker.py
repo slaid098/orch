@@ -506,6 +506,58 @@ def test_remaining_returns_at_least_one_second() -> None:
     assert worker._remaining(time.monotonic() + 0.1, cap=10) == 1
 
 
+def test_complete_attempt_refreshes_deadline_after_verification(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A verification that outlives the agent must not expire finalization."""
+
+    config = _config(tmp_path)
+    run_dir = tmp_path / "runs" / "issue-7"
+    run_dir.mkdir(parents=True)
+    deadlines: list[float] = []
+
+    monkeypatch.setattr(worker, "_run_agent", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(worker, "_ensure_changes", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(worker, "load_handoff", lambda _run_dir: _handoff())
+
+    def fake_verification(*_args: object, **_kwargs: object) -> str:
+        time.sleep(0.05)
+        return "verified"
+
+    monkeypatch.setattr(worker, "_run_tests", fake_verification)
+
+    def record(*args: object, **_kwargs: object) -> Path | None:
+        deadlines.append(float(args[-1]))
+        if len(args) == 4 and args[1] == _BRANCH:
+            return tmp_path / "result.bundle"
+        return None
+
+    monkeypatch.setattr(worker, "_finalize_commit", record)
+    monkeypatch.setattr(worker, "_write_diff", record)
+    monkeypatch.setattr(worker, "_prepare_codegraph", record)
+    monkeypatch.setattr(worker, "_bundle", record)
+
+    result = worker._complete_attempt(
+        "container",
+        config,
+        _issue(),
+        run_dir,
+        _BRANCH,
+        "base123",
+        "head123",
+        time.monotonic() + 0.001,
+        "prompt",
+        feedback=None,
+        workspace_path=tmp_path / "workspace",
+        mcp_config=None,
+    )
+
+    assert result.tests_output == "verified"
+    assert len(deadlines) == 4
+    assert all(deadline > time.monotonic() for deadline in deadlines)
+
+
 def test_exec_or_raise_reports_command_details(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
