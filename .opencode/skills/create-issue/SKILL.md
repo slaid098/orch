@@ -79,7 +79,8 @@ forge that hosts the target repository.
    ```
 
    For a Forgejo-hosted repository, select the forge explicitly. The token is
-   read from `FORGEJO_TOKEN`; never pass it on the command line:
+   read from `FORGEJO_TOKEN` or `ORCH_FORGEJO_TOKEN`; never pass it on the
+   command line:
 
    ```bash
    uv run python scripts/create_issue.py \
@@ -93,6 +94,23 @@ forge that hosts the target repository.
    `FORGEJO_URL` may replace `--url`. The script validates again and only then
    calls the forge API. It adds the `agent:queued` label by default and resolves
    label IDs before creating a Forgejo issue.
+
+   When the target project is listed in `orch.yaml`, prefer the project
+   resolver over repeating forge flags. It fills `--forge`, `--repo`, and
+   `--url` from the project entry:
+
+   ```bash
+   uv run python scripts/create_issue.py \
+     --config "path/to/orch.yaml" \
+     --project "project-name" \
+     --title "type(scope): description" \
+     --body-file "<temp-file>"
+   ```
+
+   Add `--no-label` to create an issue without any `agent:*` label. That mode
+   is for local workflows that must stay invisible to the daemon; it cannot be
+   combined with `--label`. Dependencies still link correctly and no label
+   changes are made. The canonical use is `/run-workflow`.
 8. Report the created issue URL and title.
 
 ## Цепочки и рёбра зависимостей

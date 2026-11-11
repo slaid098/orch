@@ -1,8 +1,9 @@
-FROM node:26-bookworm-slim AS node
+FROM node:22-bookworm-slim AS node
 
-FROM python:3.14-slim
+FROM python:3.12-slim-bookworm
 
 ARG DEBIAN_MIRROR=deb.debian.org
+ARG PG_VERSION=17
 ARG CLAUDE_VERSION=2.1.316
 ARG CODEGRAPH_VERSION=1.6.2
 ARG PLAYWRIGHT_MCP_VERSION=0.0.84
@@ -81,10 +82,25 @@ RUN if [ -n "$CHROMIUM_MIRROR" ]; then \
         fonts-noto-color-emoji \
     && rm -rf /var/lib/apt/lists/*
 
-RUN pip install --no-cache-dir uv playwright==1.64.1
+RUN pip install --no-cache-dir uv playwright==1.64.1 \
+    && uv --version
 
+# Postgres 16 matches the CI service container and the production database.
+RUN install -d /usr/share/postgresql-common/pgdg \
+    && curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+        -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+    && printf '%s\n' \
+        'deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt bookworm-pgdg main' \
+        > /etc/apt/sources.list.d/pgdg.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        postgresql-${PG_VERSION} \
+        postgresql-client-${PG_VERSION} \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY docker/orch-postgres.sh /usr/local/bin/orch-postgres
 COPY docker/review-gateway.py /usr/local/bin/orch-review-gateway
-RUN chmod +x /usr/local/bin/orch-review-gateway
+RUN chmod +x /usr/local/bin/orch-postgres /usr/local/bin/orch-review-gateway
 
 RUN useradd -m -u 1000 agent \
     && mkdir -p /work /out /home/agent \
@@ -97,5 +113,10 @@ RUN mkdir -p /home/agent/.claude \
 
 USER agent
 WORKDIR /work
+
+# Keep the image able to run every orchestrated project on its own Python:
+# 3.12 is the base, 3.13/3.14 are managed by uv next to the agent home.
+ENV UV_PYTHON_DOWNLOADS=automatic
+RUN uv python install 3.13 3.14
 
 CMD ["sleep", "infinity"]

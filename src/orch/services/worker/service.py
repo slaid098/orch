@@ -10,6 +10,7 @@ from pathlib import Path
 import orch.services.agent.session as session
 import orch.services.worker.claude as claude
 from orch.config.logger import get_logger
+from orch.exceptions.docker import DockerError
 from orch.exceptions.worker import AgentError, RunCancelled, WatchdogStop
 from orch.schemas.config.types import Config
 from orch.schemas.github.types import Issue
@@ -25,6 +26,8 @@ log = get_logger(component="worker")
 _GIT_ENV = (
     "export GIT_CONFIG_GLOBAL=/out/gitconfig; git config --global --add safe.directory /work; "
 )
+_CHECKPOINT_SECONDS = 120
+_TESTS_TAIL_CHARS = 6000
 
 
 def build_prompt(
@@ -194,7 +197,12 @@ def run_worker(
         )
     except Exception:
         if base_sha is not None:
-            _checkpoint(container, base_sha, run_dir, deadline)
+            _checkpoint(
+                container,
+                base_sha,
+                run_dir,
+                time.monotonic() + _CHECKPOINT_SECONDS,
+            )
         raise
     finally:
         stop(container)
@@ -243,10 +251,10 @@ def _complete_attempt(
     )
     _ensure_changes(container, head_before, deadline)
     handoff = load_handoff(run_dir)
+    tests_output = _run_tests(container, config, run_dir)
     _finalize_commit(container, base_sha, issue.title, run_dir, deadline)
     _write_diff(container, base_sha, run_dir, deadline)
     _prepare_codegraph(container, config, deadline)
-    tests_output = _run_tests(container, config, run_dir, deadline)
     bundle = _bundle(container, branch, run_dir, deadline)
     return WorkerResult(
         run_dir=run_dir,
@@ -497,7 +505,11 @@ def _run_claude_session(
     if result.cancelled:
         raise RunCancelled(result.cancel_reason or "issue closed")
     if result.stopped_by_watchdog:
-        raise WatchdogStop(result.watchdog_reason or "watchdog stopped the run")
+        raise WatchdogStop(
+            result.watchdog_reason or "watchdog stopped the run",
+            state=result.watchdog_state,
+            retryable=result.watchdog_retryable,
+        )
     if result.timed_out:
         raise AgentError("Attempt timed out")
     if result.returncode != 0:
@@ -604,21 +616,48 @@ def _run_tests(
     container: str,
     config: Config,
     run_dir: Path,
-    deadline: float,
 ) -> str:
+    """Run the independent verification gate with its own budget.
+
+    Returns:
+        The captured verification log.
+
+    Raises:
+        AgentError: If a verification command fails, the log tail is included
+            so the next attempt can see the actual error.
+        DockerError: If the container cannot execute the commands.
+    """
     commands = [*config.worker.setup_commands, *config.worker.test_commands]
     command = "cd /work && { " + " && ".join(commands) + "; } > /out/tests.txt 2>&1"
-    result = exec_in(
-        container,
-        command,
-        timeout=_remaining(deadline, cap=900),
-    )
+    budget = config.worker.verify_timeout_minutes * 60
+    deadline = time.monotonic() + budget
+    try:
+        result = exec_in(
+            container,
+            command,
+            timeout=max(1, int(deadline - time.monotonic())),
+        )
+    except DockerError as ex:
+        if "timed out" in str(ex).lower():
+            raise AgentError(
+                "Verification timed out after "
+                f"{config.worker.verify_timeout_minutes} minutes. See /out/tests.txt"
+            ) from ex
+        raise
     tests_path = run_dir / "tests.txt"
     output = tests_path.read_text(encoding="utf-8", errors="replace") if tests_path.exists() else ""
     if result.returncode != 0:
-        log.bind(returncode=result.returncode, tests=output[-2000:]).error("Worker tests failed")
-        raise AgentError(f"Tests failed. See {tests_path}")
-    log.info("Worker tests passed")
+        tail = output[-_TESTS_TAIL_CHARS:].strip()
+        log.bind(returncode=result.returncode, tests=tail[-2000:]).error(
+            "Worker verification failed"
+        )
+        raise AgentError(
+            f"Verification failed with exit code {result.returncode}. "
+            f"Tests failed. Last output:\n{tail}"
+            if tail
+            else f"Verification failed with exit code {result.returncode}. See /out/tests.txt"
+        )
+    log.info("Worker verification passed")
     return output
 
 

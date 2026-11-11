@@ -394,3 +394,36 @@ def test_pump_streams_write_files(
 
     session._pump_stderr(io.StringIO("stderr\n"), tmp_path / "stderr.log")
     assert (tmp_path / "stderr.log").read_text(encoding="utf-8") == "stderr\n"
+
+def test_process_injections_keeps_the_watchdog_stop_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import queue
+    from types import SimpleNamespace
+
+    verdict = SimpleNamespace(
+        action="stop",
+        state="looping",
+        retryable=True,
+        reason="nudge limit reached",
+    )
+    verdicts: queue.Queue[object] = queue.Queue()
+    verdicts.put(verdict)
+    runtime = SimpleNamespace(
+        verdicts=verdicts,
+        container="container",
+        watchdog_state=None,
+        watchdog_retryable=False,
+        send=lambda _text: True,
+    )
+    stopped: list[str] = []
+    monkeypatch.setattr(session, "stop_container", stopped.append)
+
+    injected, was_stopped, reason = session._process_injections(runtime, None)
+
+    assert injected is False
+    assert was_stopped is True
+    assert reason == "nudge limit reached"
+    assert runtime.watchdog_state == "looping"
+    assert runtime.watchdog_retryable is True
+    assert stopped == ["container"]

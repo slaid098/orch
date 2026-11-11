@@ -273,6 +273,7 @@ class Watchdog:
                 f"nudge limit {self._config.max_nudges} reached: "
                 f"{trigger.detail}",
                 "nudge limit reached",
+                retryable=True,
             )
         if confidence < threshold:
             reason = (
@@ -302,6 +303,8 @@ class Watchdog:
         confidence: float,
         reason: str,
         log_reason: str,
+        *,
+        retryable: bool = False,
     ) -> Verdict:
         self._stop_reason = reason
         log.bind(
@@ -314,6 +317,7 @@ class Watchdog:
             state=state,
             confidence=confidence,
             reason=reason,
+            retryable=retryable,
         )
 
     def _nudge(

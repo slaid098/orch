@@ -441,6 +441,45 @@ def test_watchdog_stop_parks_without_retry(
     assert any("Попыток: `1` из `2`" in body for body in comments)
 
 
+def test_retryable_watchdog_stop_restarts_and_then_parks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    store.init_db(config.data_dir / "orch.db")
+    calls: list[int] = []
+    comments: list[str] = []
+    _prepare_cancellation_pipeline(monkeypatch, tmp_path)
+    monkeypatch.setattr(pipeline.forge, "issue_is_open", lambda *_args: True)
+    monkeypatch.setattr(
+        pipeline.forge,
+        "delete_branch",
+        lambda *_args: None,
+    )
+    monkeypatch.setattr(
+        pipeline.forge,
+        "comment_issue",
+        lambda _repo, _number, _token, body: comments.append(body),
+    )
+
+    def run_worker(*_args: object, **kwargs: object) -> WorkerResult:
+        calls.append(int(kwargs.get("attempt", 0)))
+        raise WatchdogStop("loop confirmed", state="looping", retryable=True)
+
+    monkeypatch.setattr(pipeline, "run_worker", run_worker)
+
+    outcome = pipeline.run_issue(
+        config,
+        _issue(),
+        "token",
+        attempt_timeout_seconds=10,
+    )
+
+    assert outcome.status == "needs_human"
+    assert calls == [1, 2]
+    assert any("Попыток: `2` из `2`" in body for body in comments)
+
+
 def test_closed_issue_cancels_before_pull_request(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

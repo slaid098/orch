@@ -32,3 +32,4 @@ class Verdict:
     confidence: float
     reason: str
     nudge_text: str = ""
+    retryable: bool = False

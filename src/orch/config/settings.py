@@ -322,10 +322,16 @@ def _parse_worker(raw: dict[str, Any]) -> WorkerConfig:
         image=_optional_str(worker_raw, "image", "orch-agent:latest"),
         model=_optional_str(worker_raw, "model", "deepseek-v4.1-flash:cloud"),
         timeout_minutes=_bounded_int(
-            worker_raw.get("timeout_minutes", 90),
+            worker_raw.get("timeout_minutes", 120),
             "worker.timeout_minutes",
             minimum=1,
-            maximum=90,
+            maximum=240,
+        ),
+        verify_timeout_minutes=_bounded_int(
+            worker_raw.get("verify_timeout_minutes", 45),
+            "worker.verify_timeout_minutes",
+            minimum=1,
+            maximum=240,
         ),
         max_attempts=_bounded_int(
             worker_raw.get("max_attempts", 3),
@@ -470,7 +476,7 @@ def _parse_checks(raw: dict[str, Any]) -> ChecksConfig:
             checks_raw.get("timeout_minutes", 30),
             "checks.timeout_minutes",
             minimum=5,
-            maximum=90,
+            maximum=180,
         ),
         poll_seconds=_bounded_int(
             checks_raw.get("poll_seconds", 15),

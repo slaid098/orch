@@ -41,7 +41,8 @@ data_dir: data
     assert config.labels.queued == "agent:queued"
     assert config.labels.needs_human == "agent:needs-human"
     assert config.worker.image == "orch-agent:latest"
-    assert config.worker.timeout_minutes == 90
+    assert config.worker.timeout_minutes == 120
+    assert config.worker.verify_timeout_minutes == 45
     assert config.worker.max_attempts == 3
     assert config.worker.autocompact == "200k"
     assert config.mcp.antidetect is False
@@ -99,6 +100,7 @@ min_free_disk_gb: 20
     assert config.labels.queued == "custom:queued"
     assert config.labels.needs_human == "custom:needs-human"
     assert config.worker.timeout_minutes == 5
+    assert config.worker.verify_timeout_minutes == 45
     assert config.worker.max_attempts == 3
     assert config.worker.autocompact == "150k"
     assert config.reviewer.auto_merge is True
@@ -258,7 +260,8 @@ def test_load_config_rejects_invalid_antidetect_url(
     ("key", "value"),
     [
         ("max_attempts", 4),
-        ("timeout_minutes", 91),
+        ("timeout_minutes", 241),
+        ("verify_timeout_minutes", 241),
     ],
 )
 def test_load_config_rejects_worker_limits(
