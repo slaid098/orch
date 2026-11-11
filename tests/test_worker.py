@@ -224,6 +224,63 @@ def test_run_worker_reports_failed_tests(
     monkeypatch.setattr(worker, "stop", lambda _name: None)
     monkeypatch.setattr(worker, "load_handoff", lambda _run_dir: _handoff())
 
+    commands: list[str] = []
+
+    def fake_exec(
+        _name: str,
+        command: str,
+        *,
+        timeout: int,
+        stdout_path: Path | None = None,
+        stderr_path: Path | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        del timeout, stdout_path, stderr_path
+        commands.append(command)
+        if "printf" in command:
+            return _proc("base123\n")
+        if "git rev-parse HEAD" in command:
+            return _proc("head123\n")
+        if "git status --porcelain" in command:
+            return _proc(" M file.py\n")
+        if "git rev-list" in command:
+            return _proc("1\n")
+        if "git log -1" in command:
+            return _proc("feat(cli): add version flag\n")
+        if "/out/tests.txt" in command:
+            (run_dir / "tests.txt").write_text("boom: assertion failed\n", encoding="utf-8")
+            return _proc(code=1)
+        if "git bundle create" in command:
+            (run_dir / "result.bundle").write_text("bundle", encoding="utf-8")
+        return _proc()
+
+    monkeypatch.setattr(worker, "exec_in", fake_exec)
+
+    with pytest.raises(AgentError, match="boom: assertion failed"):
+        worker.run_worker(
+            config,
+            _issue(),
+            run_dir,
+            source_path=source,
+            workspace_path=tmp_path / "workspace",
+            branch=_BRANCH,
+            timeout_seconds=60,
+        )
+    assert not any("git commit" in command for command in commands)
+
+
+def test_run_worker_reports_verification_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    run_dir = tmp_path / "runs" / "issue-7"
+    source = tmp_path / "source"
+    source.mkdir()
+
+    monkeypatch.setattr(worker, "start_worker", lambda **_kwargs: "container")
+    monkeypatch.setattr(worker, "stop", lambda _name: None)
+    monkeypatch.setattr(worker, "load_handoff", lambda _run_dir: _handoff())
+
     def fake_exec(
         _name: str,
         command: str,
@@ -241,18 +298,13 @@ def test_run_worker_reports_failed_tests(
             return _proc(" M file.py\n")
         if "git rev-list" in command:
             return _proc("1\n")
-        if "git log -1" in command:
-            return _proc("feat(cli): add version flag\n")
         if "/out/tests.txt" in command:
-            (run_dir / "tests.txt").write_text("failed\n", encoding="utf-8")
-            return _proc(code=1)
-        if "git bundle create" in command:
-            (run_dir / "result.bundle").write_text("bundle", encoding="utf-8")
+            raise worker.DockerError("Container command timed out after 2700s")
         return _proc()
 
     monkeypatch.setattr(worker, "exec_in", fake_exec)
 
-    with pytest.raises(AgentError, match="Tests failed"):
+    with pytest.raises(AgentError, match="Verification timed out"):
         worker.run_worker(
             config,
             _issue(),
@@ -452,6 +504,58 @@ def test_remaining_rejects_expired_deadline() -> None:
 
 def test_remaining_returns_at_least_one_second() -> None:
     assert worker._remaining(time.monotonic() + 0.1, cap=10) == 1
+
+
+def test_complete_attempt_refreshes_deadline_after_verification(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A verification that outlives the agent must not expire finalization."""
+
+    config = _config(tmp_path)
+    run_dir = tmp_path / "runs" / "issue-7"
+    run_dir.mkdir(parents=True)
+    deadlines: list[float] = []
+
+    monkeypatch.setattr(worker, "_run_agent", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(worker, "_ensure_changes", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(worker, "load_handoff", lambda _run_dir: _handoff())
+
+    def fake_verification(*_args: object, **_kwargs: object) -> str:
+        time.sleep(0.05)
+        return "verified"
+
+    monkeypatch.setattr(worker, "_run_tests", fake_verification)
+
+    def record(*args: object, **_kwargs: object) -> Path | None:
+        deadlines.append(float(args[-1]))
+        if len(args) == 4 and args[1] == _BRANCH:
+            return tmp_path / "result.bundle"
+        return None
+
+    monkeypatch.setattr(worker, "_finalize_commit", record)
+    monkeypatch.setattr(worker, "_write_diff", record)
+    monkeypatch.setattr(worker, "_prepare_codegraph", record)
+    monkeypatch.setattr(worker, "_bundle", record)
+
+    result = worker._complete_attempt(
+        "container",
+        config,
+        _issue(),
+        run_dir,
+        _BRANCH,
+        "base123",
+        "head123",
+        time.monotonic() + 0.001,
+        "prompt",
+        feedback=None,
+        workspace_path=tmp_path / "workspace",
+        mcp_config=None,
+    )
+
+    assert result.tests_output == "verified"
+    assert len(deadlines) == 4
+    assert all(deadline > time.monotonic() for deadline in deadlines)
 
 
 def test_exec_or_raise_reports_command_details(
@@ -702,15 +806,19 @@ def test_run_worker_propagates_watchdog_stop(
             "cancel_reason": None,
             "stopped_by_watchdog": True,
             "watchdog_reason": "loop confirmed",
+            "watchdog_state": "looping",
+            "watchdog_retryable": True,
         },
     )()
 
-    with pytest.raises(WatchdogStop, match="loop confirmed"):
+    with pytest.raises(WatchdogStop, match="loop confirmed") as error:
         _run_stream_worker(
             tmp_path,
             monkeypatch,
             session_result=result,
         )
+    assert error.value.retryable is True
+    assert error.value.state == "looping"
 
 
 def test_run_worker_rejects_stream_timeout(

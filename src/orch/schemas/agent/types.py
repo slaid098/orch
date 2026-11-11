@@ -14,6 +14,8 @@ class SessionResult:
     timed_out: bool = False
     stopped_by_watchdog: bool = False
     watchdog_reason: str | None = None
+    watchdog_state: str | None = None
+    watchdog_retryable: bool = False
     cancelled: bool = False
     cancel_reason: str | None = None
 

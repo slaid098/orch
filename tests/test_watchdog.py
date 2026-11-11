@@ -226,6 +226,7 @@ def test_looping_nudges_then_stops(monkeypatch: pytest.MonkeyPatch) -> None:
     third = run.check()
     assert third is not None
     assert third.action == "stop"
+    assert third.retryable is True
     assert run.nudges == 2
     assert run.stop_reason is not None
     assert "nudge limit 2" in run.stop_reason
@@ -269,6 +270,7 @@ def test_needs_human_sets_stop_reason(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert verdict is not None
     assert verdict.action == "stop"
+    assert verdict.retryable is False
     assert run.stop_reason is not None
     assert "needs_human" in run.stop_reason
     assert run.nudges == 0

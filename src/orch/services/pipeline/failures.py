@@ -105,6 +105,23 @@ def _retry_outcome(
             attempts=attempt,
         )
     if isinstance(error, WatchdogStop):
+        if error.retryable and attempt < config.worker.max_attempts:
+            log.bind(
+                issue=issue.number,
+                attempt=attempt,
+                state=error.state,
+            ).warning("Watchdog stopped a stalled run; restarting in the same workspace")
+            _handle_attempt_failure(
+                config,
+                issue,
+                token,
+                run_id=run_id,
+                attempt=attempt,
+                branch=branch,
+                error=error,
+                preserve_pr=preserve_pr,
+            )
+            return None
         return _park_after_retries(
             config,
             issue,

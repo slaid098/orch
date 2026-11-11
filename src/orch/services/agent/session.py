@@ -49,6 +49,8 @@ class _SessionRuntime:
         self.timed_out = False
         self.stopped_by_watchdog = False
         self.watchdog_reason: str | None = None
+        self.watchdog_state: str | None = None
+        self.watchdog_retryable = False
         self.cancelled = False
         self.cancel_reason: str | None = None
         self.handoff_since = time.monotonic()
@@ -123,6 +125,8 @@ class _SessionRuntime:
             timed_out=self.timed_out,
             stopped_by_watchdog=self.stopped_by_watchdog,
             watchdog_reason=self.watchdog_reason,
+            watchdog_state=self.watchdog_state,
+            watchdog_retryable=self.watchdog_retryable,
             cancelled=self.cancelled,
             cancel_reason=self.cancel_reason,
         )
@@ -284,6 +288,8 @@ def _process_injections(
                 injected = True
                 log.warning("Watchdog nudged the live session: {}", verdict.reason)
         elif verdict.action == "stop":
+            runtime.watchdog_state = verdict.state
+            runtime.watchdog_retryable = bool(getattr(verdict, "retryable", False))
             _stop(runtime.container)
             return injected, True, verdict.reason
     return injected, False, None

@@ -925,3 +925,225 @@ def test_blocked_by_without_repo_resolves_it_from_gh(
     assert commands[1][1:3] == ["repo", "view"]
     assert resolved == [("slaid098", None)]
     assert added == [("slaid098/orch", 12, 3, "token")]
+
+def test_no_label_creates_a_github_issue_without_labels(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    commands: list[list[str]] = []
+    monkeypatch.setattr(
+        create_issue.subprocess,
+        "run",
+        _fake_gh("https://example.test/issues/12", commands),
+    )
+
+    code = create_issue.main(
+        [
+            "--repo",
+            "slaid098/orch",
+            "--title",
+            "test(standards): validate issue creation",
+            "--body-file",
+            str(_body_file(tmp_path)),
+            "--no-label",
+        ]
+    )
+
+    assert code == 0
+    assert "--label" not in commands[0]
+    assert "https://example.test/issues/12" in capsys.readouterr().out
+
+
+def test_no_label_creates_a_forgejo_issue_without_labels(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+    monkeypatch.setenv("FORGEJO_URL", "https://git.example.test")
+    monkeypatch.setenv("FORGEJO_TOKEN", "secret")
+    monkeypatch.setattr(
+        create_issue,
+        "create_forgejo_issue",
+        lambda _url, _repo, _token, **kwargs: calls.append(kwargs)
+        or "https://git.example.test/slaid098/orch/issues/5",
+    )
+
+    code = create_issue.main(
+        [
+            "--forge",
+            "forgejo",
+            "--repo",
+            "slaid098/orch",
+            "--title",
+            "test(standards): validate issue creation",
+            "--body-file",
+            str(_body_file(tmp_path)),
+            "--no-label",
+        ]
+    )
+
+    assert code == 0
+    assert calls[0]["labels"] == ()
+
+
+def test_no_label_with_blocked_by_links_without_label_changes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[list[str]] = []
+    added: list[tuple[str, int, int, str]] = []
+    edits: list[tuple[str, int, dict[str, object]]] = []
+    _github_dependency_env(
+        monkeypatch,
+        url="https://example.test/issues/12",
+        commands=commands,
+        added=added,
+        edits=edits,
+    )
+
+    code = create_issue.main(
+        [
+            "--repo",
+            "slaid098/orch",
+            "--title",
+            "test(standards): validate issue creation",
+            "--body-file",
+            str(_body_file(tmp_path)),
+            "--no-label",
+            "--blocked-by",
+            "3",
+        ]
+    )
+
+    assert code == 0
+    assert "--label" not in commands[0]
+    assert added == [("slaid098/orch", 12, 3, "token")]
+    assert edits == []
+
+
+def test_no_label_and_label_are_mutually_exclusive(tmp_path: Path) -> None:
+    with pytest.raises(SystemExit) as error:
+        create_issue.main(
+            [
+                "--title",
+                "test(standards): validate issue creation",
+                "--body-file",
+                str(_body_file(tmp_path)),
+                "--no-label",
+                "--label",
+                "agent:queued",
+            ]
+        )
+
+    assert error.value.code == 2
+
+
+def test_project_resolves_the_forgejo_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "orch.yaml"
+    config_path.write_text(
+        """
+projects:
+  - name: youtube-kit
+    repo:
+      owner: slaid098
+      name: youtube-kit
+      path: .
+      forge: forgejo
+      url: https://git.slaid098.dev
+""",
+        encoding="utf-8",
+    )
+    calls: list[tuple[str, str, str, dict[str, object]]] = []
+    monkeypatch.setenv("FORGEJO_TOKEN", "secret")
+    monkeypatch.setattr(
+        create_issue,
+        "create_forgejo_issue",
+        lambda url, repo, token, **kwargs: calls.append((url, repo, token, kwargs))
+        or "https://git.slaid098.dev/slaid098/youtube-kit/issues/5",
+    )
+
+    code = create_issue.main(
+        [
+            "--config",
+            str(config_path),
+            "--project",
+            "youtube-kit",
+            "--title",
+            "test(standards): validate issue creation",
+            "--body-file",
+            str(_body_file(tmp_path)),
+            "--no-label",
+        ]
+    )
+
+    assert code == 0
+    assert calls[0][0:3] == (
+        "https://git.slaid098.dev",
+        "slaid098/youtube-kit",
+        "secret",
+    )
+    assert calls[0][3]["labels"] == ()
+
+
+def test_project_unknown_name_fails_before_creation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "orch.yaml"
+    config_path.write_text("projects: []\n", encoding="utf-8")
+    monkeypatch.setattr(
+        create_issue.subprocess,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail("creation must not start"),
+    )
+
+    code = create_issue.main(
+        [
+            "--config",
+            str(config_path),
+            "--project",
+            "missing",
+            "--title",
+            "test(standards): validate issue creation",
+            "--body-file",
+            str(_body_file(tmp_path)),
+        ]
+    )
+
+    assert code == 1
+
+
+def test_forgejo_token_falls_back_to_orch_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    monkeypatch.delenv("FORGEJO_TOKEN", raising=False)
+    monkeypatch.setenv("ORCH_FORGEJO_TOKEN", "orch-secret")
+    monkeypatch.setenv("FORGEJO_URL", "https://git.example.test")
+    monkeypatch.setattr(
+        create_issue,
+        "create_forgejo_issue",
+        lambda _url, _repo, token, **_kwargs: calls.append(token) or "url",
+    )
+
+    code = create_issue.main(
+        [
+            "--forge",
+            "forgejo",
+            "--repo",
+            "slaid098/orch",
+            "--title",
+            "test(standards): validate issue creation",
+            "--body-file",
+            str(_body_file(tmp_path)),
+            "--no-label",
+        ]
+    )
+
+    assert code == 0
+    assert calls == ["orch-secret"]

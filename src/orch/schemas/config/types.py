@@ -41,7 +41,8 @@ class WorkerConfig:
 
     image: str = "orch-agent:latest"
     model: str = "deepseek-v4.1-flash:cloud"
-    timeout_minutes: int = 90
+    timeout_minutes: int = 120
+    verify_timeout_minutes: int = 45
     max_attempts: int = 3
     allowed_tools: str = "Read,Write,Edit,Bash,Glob,Grep"
     autocompact: str = "200k"
